@@ -137,8 +137,22 @@ class WebSearchTool(Tool):
             return None
 
         try:
-            ddgs = DDGS(impersonate=self.impersonate)
-            results = ddgs.text(query, max_results=n)
+            # Initialize DDGS - impersonate is handled internally by the library
+            # Only pass impersonate if DDGS accepts it (older versions)
+            import inspect
+            import io
+            import contextlib
+            import sys
+
+            ddgs_kwargs = {}
+            if 'impersonate' in inspect.signature(DDGS.__init__).parameters:
+                ddgs_kwargs['impersonate'] = self.impersonate
+
+            # Suppress ddgs library warnings (printed to stderr)
+            stderr_capture = io.StringIO()
+            with contextlib.redirect_stderr(stderr_capture):
+                ddgs = DDGS(**ddgs_kwargs)
+                results = ddgs.text(query, max_results=n)
 
             if not results:
                 logger.debug(f"No DuckDuckGo results for: {query}")
