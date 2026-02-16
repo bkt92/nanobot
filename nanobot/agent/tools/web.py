@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
@@ -15,13 +16,13 @@ from nanobot.agent.tools.base import Tool
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
 
-# Try to import DuckDuckGo search library
+# Try to import DuckDuckGo search library (renamed to ddgs)
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     DDG_AVAILABLE = True
 except ImportError:
     DDG_AVAILABLE = False
-
+    logger.warning("ddgs package not installed. DuckDuckGo search will be unavailable. Install with: pip install ddgs")
 
 def _strip_tags(text: str) -> str:
     """Remove HTML tags and decode entities."""
@@ -51,42 +52,48 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 class WebSearchTool(Tool):
-    """Search web using DuckDuckGo (default) with optional Brave API support."""
+    """Search web using DuckDuckGo (default) with optional Brave API support.
+
+    Engines:
+    - ddg (DuckDuckGo): Default, most reliable, requires pip install ddgs
+    - brave: Privacy-focused, requires BRAVE_API_KEY environment variable
+    """
 
     name = "web_search"
-    description = "Search web using multiple engines. Returns titles, URLs, and snippets. Engine options: 'ddg' (DuckDuckGo - general search, default), 'wikipedia' (encyclopedic/factual information), 'searxng' (aggregated search), 'brave' (privacy-focused, requires API key), 'combine' (all engines)."
+    description = "Search web using multiple engines. Returns titles, URLs, and snippets. Engine options: 'ddg' (DuckDuckGo - general search, default, most reliable), 'brave' (privacy-focused, requires API key)."
     parameters = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Search query"},
             "count": {"type": "integer", "description": "Results (1-10)", "minimum": 1, "maximum": 10},
-            "engine": {"type": "string", "description": "Search engine: 'ddg' (default, general web), 'wikipedia' (factual/encyclopedic), 'searxng' (aggregated), 'brave' (requires API key), 'combine' (all engines)", "enum": ["ddg", "wikipedia", "searxng", "brave", "combine"]}
+            "engine": {"type": "string", "description": "Search engine: 'ddg' (default, general web), 'brave' (requires API key)", "enum": ["ddg", "brave"]}
         },
         "required": ["query"]
     }
 
-    def __init__(self, api_key: str | None = None, max_results: int = 5, engine: str = "ddg"):
+    def __init__(self, api_key: str | None = None, max_results: int = 5, engine: str = "ddg", impersonate: str = "random"):
         """
         Initialize web search tool.
 
         Args:
             api_key: Brave Search API key (optional, for Brave engine)
             max_results: Maximum number of results to return
-            engine: Search engine to use - "ddg" (default), "brave", "searxng", "wikipedia", "combine"
+            engine: Search engine to use - "ddg" (default), "brave"
                        - "ddg": Use DuckDuckGo - free, no API key needed (default)
                        - "brave": Use Brave API - requires api_key
-                       - "searxng": Use SearXNG - free, no API key needed
-                       - "wikipedia": Use Wikipedia - free, no API key needed
-                       - "combine": Search all available engines and combine results
+            impersonate: Browser impersonation for DuckDuckGo (default: "random")
+                         Options: "random", "chrome", "firefox", "safari", etc.
         """
         self.api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
         self.max_results = max_results
         self.engine = engine.lower()
+        self.impersonate = impersonate
         self._ddg_available = DDG_AVAILABLE
 
     async def _search_brave(self, query: str, n: int) -> str | None:
         """Try searching with Brave API."""
         if not self.api_key:
+            logger.debug("Brave API key not provided")
             return None
 
         try:
@@ -95,103 +102,56 @@ class WebSearchTool(Tool):
                     "https://api.search.brave.com/res/v1/web/search",
                     params={"q": query, "count": n},
                     headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
-                    timeout=10.0
+                    timeout=15.0
                 )
                 r.raise_for_status()
 
             results = r.json().get("web", {}).get("results", [])
             if not results:
+                logger.debug(f"No Brave results for: {query}")
                 return None
 
-            lines = [f"Results for: {query}\n"]
+            lines = [f"Brave results for: {query}\n"]
             for i, item in enumerate(results[:n], 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
             return "\n".join(lines)
-        except Exception:
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                logger.error("Brave API key is invalid or unauthorized")
+            else:
+                logger.error(f"Brave API error: {e.response.status_code}")
+            return None
+        except httpx.TimeoutException:
+            logger.error("Brave API timeout")
+            return None
+        except Exception as e:
+            logger.error(f"Brave search failed: {e}")
             return None
 
     async def _search_ddg(self, query: str, n: int) -> str | None:
         """Try searching with DuckDuckGo."""
         if not self._ddg_available:
+            logger.debug("DuckDuckGo (ddgs) not available")
             return None
 
         try:
-            ddgs = DDGS()
+            ddgs = DDGS(impersonate=self.impersonate)
             results = ddgs.text(query, max_results=n)
 
             if not results:
+                logger.debug(f"No DuckDuckGo results for: {query}")
                 return None
 
-            lines = [f"Results for: {query}\n"]
+            lines = [f"DuckDuckGo results for: {query}\n"]
             for i, item in enumerate(results[:n], 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('link', '')}")
                 if body := item.get("body"):
                     lines.append(f"   {body}")
             return "\n".join(lines)
-        except Exception:
-            return None
-
-    async def _search_searxng(self, query: str, n: int) -> str | None:
-        """Try searching with SearXNG."""
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                        "https://searx.ng/search",
-                        params={
-                            "q": query,
-                            "format": "json",
-                            "engines": "google,bing,duckduckgo,brave"
-                        },
-                        timeout=10.0
-                    )
-                    r.raise_for_status()
-
-            results = r.json().get("results", [])
-            if not results:
-                return None
-
-            lines = [f"Results for: {query}\n"]
-            for i, item in enumerate(results[:n], 1):
-                title = item.get("title", "")
-                url = item.get("url", "")
-                snippet = item.get("content", "")[:100]
-                lines.append(f"{i}. {title}\n   {url}")
-                if snippet:
-                    lines.append(f"   {snippet}")
-            return "\n".join(lines)
-        except Exception:
-            return None
-
-    async def _search_wikipedia(self, query: str, n: int) -> str | None:
-        """Try searching with Wikipedia."""
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                            "https://en.wikipedia.org/w/api.php",
-                            params={
-                                "action": "query",
-                                "list": "search",
-                                "srsearch": query,
-                                "srlimit": n,
-                                "format": "json"
-                            },
-                            timeout=10.0
-                        )
-                    r.raise_for_status()
-
-            results = r.json().get("query", {}).get("search", [])
-            if not results:
-                return None
-
-            lines = [f"Wikipedia results for: {query}\n"]
-            for i, item in enumerate(results[:n], 1):
-                title = item.get("title", "")
-                snippet = item.get("snippet", "")[:200]
-                lines.append(f"{i}. {title}\n   {snippet}")
-            return "\n".join(lines)
-        except Exception:
+        except Exception as e:
+            logger.error(f"DuckDuckGo search failed: {e}")
             return None
 
     async def _search_engine(self, engine: str, query: str, n: int) -> str | None:
@@ -200,10 +160,6 @@ class WebSearchTool(Tool):
             return await self._search_brave(query, n)
         elif engine == "ddg":
             return await self._search_ddg(query, n)
-        elif engine == "searxng":
-            return await self._search_searxng(query, n)
-        elif engine == "wikipedia":
-            return await self._search_wikipedia(query, n)
         return None
 
     async def execute(self, query: str, count: int | None = None, engine: str | None = None, **kwargs: Any) -> str:
@@ -212,27 +168,18 @@ class WebSearchTool(Tool):
         # Use engine from parameter if provided, otherwise use default
         search_engine = (engine or self.engine).lower()
 
-        # Combine mode: search all engines
-        if search_engine == "combine":
-            engine_results = {}
-            for engine in ["ddg", "searxng", "wikipedia", "brave"]:
-                engine_results[engine] = await self._search_engine(engine, query, n)
-
-            if any(engine_results.values()):
-                combined = []
-                for eng, res in engine_results.items():
-                    combined.extend(res or [])
-                return "\n".join(combined)
-            return "Error: All search engines failed. Try installing duckduckgo-search or check your internet connection."
-
-        # Single engine mode
+        # Search using the specified engine
         result = await self._search_engine(search_engine, query, n)
 
         if result:
             return result
         elif search_engine == "brave":
-            return "Error: Brave search failed. Check your API key."
-        return f"Error: {search_engine} search failed. Try installing duckduckgo-search or check your internet connection."
+            if not self.api_key:
+                return "Error: Brave search requires an API key. Set BRAVE_API_KEY environment variable or pass api_key parameter."
+            return "Error: Brave search failed. Check your API key is valid."
+        elif search_engine == "ddg" and not DDG_AVAILABLE:
+            return "Error: DuckDuckGo search requires the ddgs package. Install it with: pip install ddgs"
+        return f"Error: {search_engine} search failed."
 
 
 class WebFetchTool(Tool):

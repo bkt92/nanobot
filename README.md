@@ -103,8 +103,7 @@ pip install nanobot-ai
 
 **Note**: nanobot now supports **free web search without any API key**:
 > - Uses **DuckDuckGo** by default (no API key needed)
-> - Or use **SearXNG** (free, privacy-focused metasearch engine) via `web_search(engine="searxng")`
-> - Or use **Wikipedia** (free, encyclopedic) via `wikipedia_search()`
+> - Or use **Brave** (privacy-focused) via `web_search(engine="brave")` with BRAVE_API_KEY
 
 **1. Initialize**
 
@@ -781,44 +780,12 @@ nanobot includes multiple **free search providers** that don't require API keys:
 - **No API key required**
 - **Best for**: General web search, privacy-focused
 
-### SearXNG
-
-- **Engine**: `web_search(engine="searxng")` (not available as standalone tool)
-- **No API key required** (if using public instance)
-- **Features**:
-  - Aggregates 70+ search engines (Google, Bing, Brave, etc.)
-  - Privacy-focused with no tracking
-  - JSON format
-- **Best for**: Comprehensive results, privacy, research
-
-### Wikipedia
-
-- **Engine**: `web_search(engine="wikipedia")` (not available as standalone tool)
-- **No API key required**
-- **Features**:
-  - Full-text search of Wikipedia articles
-  - Encyclopedic, factual knowledge
-- **Best for**: Factual queries, definitions, research
-
-### Combine Mode (Search All Engines)
-
-- **Engine**: `web_search(combine=True)` or `web_search(engine="combine")`
-- **No API key required** for free engines (DuckDuckGo, SearXNG, Wikipedia)
-- **Features**:
-  - Searches all available engines simultaneously
-  - Combines results from all successful searches
-  - Best coverage and redundancy
-- **Best for**: Maximum results, research, comprehensive queries
-
 ### Quick Comparison
 
 | Provider | API Key | Engine Name | Best For |
 |---|---|---|---|---|
 | **DuckDuckGo** | ❌ No | `ddg_search` | General web search |
-| **SearXNG** | ❌ No | `engine="searxng"` | Privacy, research |
-| **Wikipedia** | ❌ No | `engine="wikipedia"` | Facts, definitions |
 | **Brave** | ✅ Yes | `engine="brave"` | Fast, accurate |
-| **Combine** | ❌ No (free) | `combine=True` | All engines at once |
 
 > 💡 **Tip**: Use `engine="auto"` (default) to automatically try paid APIs first, then fall back to free options!
 
