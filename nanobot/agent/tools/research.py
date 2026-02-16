@@ -8,7 +8,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
-from nanobot.agent.tools.web import WebSearchTool, WebFetchTool, SEARXNG_AVAILABLE
+from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 
 
 class ResearchTool(Tool):
@@ -66,8 +66,13 @@ class ResearchTool(Tool):
             api_key: Optional Brave Search API key
             max_results: Default max results per search
         """
-        # Use Searxng by default if available, otherwise fall back to ddg
-        default_engine = "searxng" if SEARXNG_AVAILABLE else "ddg"
+        # Check if Searxng URL is configured
+        import os
+        searxng_url = os.getenv("SEARXNG_URL", "")
+        self.searxng_available = bool(searxng_url)
+
+        # Use Searxng by default if URL is configured, otherwise fall back to ddg
+        default_engine = "searxng" if self.searxng_available else "ddg"
         self.web_search = WebSearchTool(
             api_key=api_key,
             max_results=max_results,
@@ -75,7 +80,6 @@ class ResearchTool(Tool):
         )
         self.web_fetch = WebFetchTool()
         self.max_results = max_results
-        self.searxng_available = SEARXNG_AVAILABLE
 
     async def execute(
         self, query: str, mode: str = "balanced", max_results: int | None = None, use_searxng: bool | None = None, **kwargs: Any

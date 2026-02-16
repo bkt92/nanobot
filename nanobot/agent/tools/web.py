@@ -12,13 +12,13 @@ from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
-# Try to import Searxng client (optional, for multi-engine search)
+# Try to import Searxng HTTP client (optional, for multi-engine search)
 try:
-    from nanobot.agent.tools.searxng_client import SearxngClient
+    from nanobot.agent.tools.searxng_http_client import SearxngHttpClient
     SEARXNG_AVAILABLE = True
 except ImportError:
     SEARXNG_AVAILABLE = False
-    logger.debug("Searxng client not available. Install or configure SEARXNG_PATH to enable.")
+    logger.debug("Searxng HTTP client not available. Set SEARXNG_URL to enable.")
 
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
@@ -107,7 +107,7 @@ class WebSearchTool(Tool):
             api_key: Brave Search API key (optional, for Brave engine)
             max_results: Maximum number of results to return
             engine: Search engine to use - "searxng", "ddg" (default), "brave"
-                       - "searxng": Use Searxng metasearch - aggregates from 70+ engines
+                       - "searxng": Use Searxng metasearch server (requires SEARXNG_URL)
                        - "ddg": Use DuckDuckGo - free, no API key needed (default)
                        - "brave": Use Brave API - requires api_key
             impersonate: Browser impersonation for DuckDuckGo (default: "random")
@@ -119,10 +119,10 @@ class WebSearchTool(Tool):
         self.impersonate = impersonate
         self._ddg_available = DDG_AVAILABLE
 
-        # Initialize Searxng client if using searxng engine
+        # Initialize Searxng HTTP client if using searxng engine
         self.searxng_client = None
         if self.engine == "searxng" and SEARXNG_AVAILABLE:
-            self.searxng_client = SearxngClient()
+            self.searxng_client = SearxngHttpClient()
 
     async def _search_brave(self, query: str, n: int) -> str | None:
         """Try searching with Brave API."""
@@ -203,13 +203,13 @@ class WebSearchTool(Tool):
             return None
 
     async def _search_searxng(self, query: str, n: int, **kwargs: Any) -> str | None:
-        """Try searching with Searxng metasearch engine."""
+        """Try searching with Searxng metasearch engine via HTTP."""
         if not SEARXNG_AVAILABLE:
-            logger.debug("Searxng client not available")
+            logger.debug("Searxng HTTP client not available")
             return None
 
         if not self.searxng_client:
-            self.searxng_client = SearxngClient()
+            self.searxng_client = SearxngHttpClient()
 
         try:
             # Extract Searxng-specific parameters
@@ -217,14 +217,14 @@ class WebSearchTool(Tool):
             categories = kwargs.get("categories", None)
             time_range = kwargs.get("time_range", None)
 
-            # Perform search
-            results = self.searxng_client.search(
+            # Perform search (async HTTP request)
+            results = await self.searxng_client.search(
                 query=query,
                 engines=engines,
                 categories=categories,
-                lang="en",
-                safesearch=0,
+                language="en",
                 time_range=time_range,
+                safesearch=0,
                 count=n,
             )
 
