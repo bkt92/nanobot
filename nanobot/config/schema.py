@@ -244,9 +244,17 @@ class GatewayConfig(BaseModel):
 
 class WebSearchConfig(BaseModel):
     """Web search tool configuration."""
-    engine: str = "auto"  # "auto", "brave", "ddg"
+    engine: str = "auto"  # "auto", "searxng", "brave", "ddg"
     api_key: str = ""  # Brave Search API key
     max_results: int = 5
+
+    # Searxng-specific configuration
+    searxng_path: str = "/root/nanobot/searxng"  # Path to Searxng installation
+    searxng_enabled: bool = True  # Enable/disable Searxng (auto-detected if path exists)
+
+    # Default Searxng search parameters
+    default_engines: list[str] = ["duckduckgo", "brave", "bing"]  # Default engines to use
+    default_categories: list[str] = ["general"]  # Default search categories
 
 
 class WebToolsConfig(BaseModel):

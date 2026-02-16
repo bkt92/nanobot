@@ -12,6 +12,14 @@ from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
+# Try to import Searxng client (optional, for multi-engine search)
+try:
+    from nanobot.agent.tools.searxng_client import SearxngClient
+    SEARXNG_AVAILABLE = True
+except ImportError:
+    SEARXNG_AVAILABLE = False
+    logger.debug("Searxng client not available. Install or configure SEARXNG_PATH to enable.")
+
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
@@ -52,21 +60,41 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 class WebSearchTool(Tool):
-    """Search web using DuckDuckGo (default) with optional Brave API support.
+    """Search web using multiple engines with Searxng metasearch.
 
     Engines:
-    - ddg (DuckDuckGo): Default, most reliable, requires pip install ddgs
+    - searxng (Searxng): Multi-engine metasearch, aggregates from 70+ engines (best for research)
+    - ddg (DuckDuckGo): General search, requires pip install ddgs
     - brave: Privacy-focused, requires BRAVE_API_KEY environment variable
     """
 
     name = "web_search"
-    description = "Search web using multiple engines. Returns titles, URLs, and snippets. Engine options: 'ddg' (DuckDuckGo - general search, default, most reliable), 'brave' (privacy-focused, requires API key)."
+    description = "Search web using multiple engines. Returns titles, URLs, and snippets. Engine options: 'searxng' (multi-engine metasearch, best for research), 'ddg' (DuckDuckGo - general search, default), 'brave' (privacy-focused, requires API key)."
     parameters = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Search query"},
             "count": {"type": "integer", "description": "Results (1-10)", "minimum": 1, "maximum": 10},
-            "engine": {"type": "string", "description": "Search engine: 'ddg' (default, general web), 'brave' (requires API key)", "enum": ["ddg", "brave"]}
+            "engine": {
+                "type": "string",
+                "description": "Search engine: 'searxng' (multi-engine metasearch), 'ddg' (DuckDuckGo, default), 'brave' (requires API key)",
+                "enum": ["searxng", "ddg", "brave"]
+            },
+            "engines": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "For searxng engine: list of specific engines to use (e.g., ['duckduckgo', 'brave', 'bing'])"
+            },
+            "categories": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "For searxng engine: search categories (e.g., ['general', 'news', 'images'])"
+            },
+            "time_range": {
+                "type": "string",
+                "enum": ["day", "week", "month", "year"],
+                "description": "For searxng engine: filter results by time range"
+            }
         },
         "required": ["query"]
     }
@@ -78,7 +106,8 @@ class WebSearchTool(Tool):
         Args:
             api_key: Brave Search API key (optional, for Brave engine)
             max_results: Maximum number of results to return
-            engine: Search engine to use - "ddg" (default), "brave"
+            engine: Search engine to use - "searxng", "ddg" (default), "brave"
+                       - "searxng": Use Searxng metasearch - aggregates from 70+ engines
                        - "ddg": Use DuckDuckGo - free, no API key needed (default)
                        - "brave": Use Brave API - requires api_key
             impersonate: Browser impersonation for DuckDuckGo (default: "random")
@@ -89,6 +118,11 @@ class WebSearchTool(Tool):
         self.engine = engine.lower()
         self.impersonate = impersonate
         self._ddg_available = DDG_AVAILABLE
+
+        # Initialize Searxng client if using searxng engine
+        self.searxng_client = None
+        if self.engine == "searxng" and SEARXNG_AVAILABLE:
+            self.searxng_client = SearxngClient()
 
     async def _search_brave(self, query: str, n: int) -> str | None:
         """Try searching with Brave API."""
@@ -168,9 +202,66 @@ class WebSearchTool(Tool):
             logger.error(f"DuckDuckGo search failed: {e}")
             return None
 
-    async def _search_engine(self, engine: str, query: str, n: int) -> str | None:
+    async def _search_searxng(self, query: str, n: int, **kwargs: Any) -> str | None:
+        """Try searching with Searxng metasearch engine."""
+        if not SEARXNG_AVAILABLE:
+            logger.debug("Searxng client not available")
+            return None
+
+        if not self.searxng_client:
+            self.searxng_client = SearxngClient()
+
+        try:
+            # Extract Searxng-specific parameters
+            engines = kwargs.get("engines", None)
+            categories = kwargs.get("categories", None)
+            time_range = kwargs.get("time_range", None)
+
+            # Perform search
+            results = self.searxng_client.search(
+                query=query,
+                engines=engines,
+                categories=categories,
+                lang="en",
+                safesearch=0,
+                time_range=time_range,
+                count=n,
+            )
+
+            if not results:
+                logger.debug(f"No Searxng results for: {query}")
+                return None
+
+            # Format results
+            engine_names = engines or ["multiple"]
+            lines = [f"Searxng results for: {query} (engines: {', '.join(engine_names)})\n"]
+
+            for i, result in enumerate(results[:n], 1):
+                lines.append(f"{i}. {result.get('title', '')}")
+                lines.append(f"   {result.get('url', '')}")
+                if content := result.get('content', ''):
+                    lines.append(f"   {content[:200]}{'...' if len(content) > 200 else ''}")
+                # Show which engine provided this result
+                if engine := result.get('engine', ''):
+                    lines.append(f"   Engine: {engine}")
+                if published_date := result.get('publishedDate'):
+                    lines.append(f"   Published: {published_date}")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.error(f"Searxng search failed: {e}")
+            return None
+
+    async def _search_engine(self, engine: str, query: str, n: int, **kwargs: Any) -> str | None:
         """Search using specified engine."""
-        if engine == "brave":
+        # Handle "auto" by falling back to "ddg" (default)
+        if engine == "auto":
+            engine = "ddg"
+
+        if engine == "searxng":
+            return await self._search_searxng(query, n, **kwargs)
+        elif engine == "brave":
             return await self._search_brave(query, n)
         elif engine == "ddg":
             return await self._search_ddg(query, n)
@@ -183,10 +274,14 @@ class WebSearchTool(Tool):
         search_engine = (engine or self.engine).lower()
 
         # Search using the specified engine
-        result = await self._search_engine(search_engine, query, n)
+        result = await self._search_engine(search_engine, query, n, **kwargs)
 
         if result:
             return result
+        elif search_engine == "searxng":
+            if not SEARXNG_AVAILABLE:
+                return "Error: Searxng is not available. Check SEARXNG_PATH environment variable."
+            return "Error: Searxng search failed. Try a different engine."
         elif search_engine == "brave":
             if not self.api_key:
                 return "Error: Brave search requires an API key. Set BRAVE_API_KEY environment variable or pass api_key parameter."

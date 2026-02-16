@@ -8,7 +8,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
-from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
+from nanobot.agent.tools.web import WebSearchTool, WebFetchTool, SEARXNG_AVAILABLE
 
 
 class ResearchTool(Tool):
@@ -17,7 +17,8 @@ class ResearchTool(Tool):
 
     Implements iterative search with:
     - Multiple research modes (speed/balanced/quality)
-    - Reasoning steps for planning
+    - Multi-engine search (Searxng, DuckDuckGo, Brave)
+    - Category-specific searches (general, news, images)
     - Progressive query refinement
     - Source deduplication and synthesis
     """
@@ -28,7 +29,8 @@ class ResearchTool(Tool):
         "Supports three modes: 'speed' (2 iterations, quick answers), "
         "'balanced' (6 iterations, moderate depth with reasoning), "
         "'quality' (25 iterations, comprehensive research). "
-        "Uses multiple search rounds with query refinement and source synthesis."
+        "Uses multiple search rounds with query refinement and source synthesis. "
+        "Leverages Searxng for multi-engine, multi-category search when available."
     )
     parameters = {
         "type": "object",
@@ -48,6 +50,10 @@ class ResearchTool(Tool):
                 "minimum": 1,
                 "maximum": 10,
             },
+            "use_searxng": {
+                "type": "boolean",
+                "description": "Use Searxng multi-engine search (default: true if available)",
+            },
         },
         "required": ["query"],
     }
@@ -60,12 +66,19 @@ class ResearchTool(Tool):
             api_key: Optional Brave Search API key
             max_results: Default max results per search
         """
-        self.web_search = WebSearchTool(api_key=api_key, max_results=max_results)
+        # Use Searxng by default if available, otherwise fall back to ddg
+        default_engine = "searxng" if SEARXNG_AVAILABLE else "ddg"
+        self.web_search = WebSearchTool(
+            api_key=api_key,
+            max_results=max_results,
+            engine=default_engine
+        )
         self.web_fetch = WebFetchTool()
         self.max_results = max_results
+        self.searxng_available = SEARXNG_AVAILABLE
 
     async def execute(
-        self, query: str, mode: str = "balanced", max_results: int | None = None, **kwargs: Any
+        self, query: str, mode: str = "balanced", max_results: int | None = None, use_searxng: bool | None = None, **kwargs: Any
     ) -> str:
         """
         Execute deep research on the given query.
@@ -74,17 +87,21 @@ class ResearchTool(Tool):
             query: Research topic or question
             mode: Research mode (speed/balanced/quality)
             max_results: Override default max results per search
+            use_searxng: Use Searxng multi-engine search (default: auto-detect)
 
         Returns:
             Research findings with sources
         """
         max_results = max_results or self.max_results
 
+        # Determine if we should use Searxng
+        use_searxng_engine = use_searxng if use_searxng is not None else self.searxng_available
+
         # Determine iterations based on mode (cloning Perplexica's approach)
         mode_iterations = {"speed": 2, "balanced": 6, "quality": 25}
         max_iterations = mode_iterations.get(mode, 6)
 
-        logger.info(f"Starting deep research (mode={mode}, max_iterations={max_iterations}): {query}")
+        logger.info(f"Starting deep research (mode={mode}, max_iterations={max_iterations}, use_searxng={use_searxng_engine}): {query}")
 
         # Research state
         search_history = []
@@ -97,30 +114,39 @@ class ResearchTool(Tool):
             for iteration in range(max_iterations):
                 logger.debug(f"Research iteration {iteration + 1}/{max_iterations}")
 
-                # Generate queries for this iteration
-                queries = await self._generate_queries(
+                # Generate search strategies with engine/category configuration
+                search_strategies = await self._generate_search_strategies(
                     query=query,
                     iteration=iteration,
                     max_iterations=max_iterations,
                     mode=mode,
+                    use_searxng=use_searxng_engine,
                     previous_findings=all_findings,
-                    current_plan=current_plan,
                 )
 
-                if not queries:
-                    logger.debug("No more queries to search, ending research")
+                if not search_strategies:
+                    logger.debug("No more search strategies, ending research")
                     break
 
                 # Update plan for progress tracking
-                if len(queries) > 0:
-                    current_plan = f"Searching for: {', '.join(queries[:2])}"
-                    if len(queries) > 2:
-                        current_plan += f" and {len(queries) - 2} more queries"
+                strategies_summary = ", ".join([s["query"] for s in search_strategies[:2]])
+                current_plan = f"Searching for: {strategies_summary}"
+                if len(search_strategies) > 2:
+                    current_plan += f" and {len(search_strategies) - 2} more queries"
 
-                # Execute searches in parallel
-                search_tasks = [
-                    self.web_search.execute(q, count=max_results) for q in queries[:3]
-                ]
+                # Execute searches with their specific engine/category configs
+                search_tasks = []
+                for strategy in search_strategies[:3]:
+                    task = self.web_search.execute(
+                        strategy["query"],
+                        count=max_results,
+                        engine=strategy.get("engine"),
+                        engines=strategy.get("engines"),
+                        categories=strategy.get("categories"),
+                        time_range=strategy.get("time_range"),
+                    )
+                    search_tasks.append(task)
+
                 search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
 
                 # Process results
@@ -137,7 +163,7 @@ class ResearchTool(Tool):
 
                 search_history.append({
                     "iteration": iteration + 1,
-                    "queries": queries[:3],
+                    "strategies": search_strategies[:3],
                     "new_sources": len(iteration_findings),
                     "plan": current_plan,
                 })
@@ -158,69 +184,175 @@ class ResearchTool(Tool):
                 "partial_findings": all_findings[:5],
             })
 
-    async def _generate_queries(
+    async def _generate_search_strategies(
         self,
         query: str,
         iteration: int,
         max_iterations: int,
         mode: str,
+        use_searxng: bool,
         previous_findings: list[dict],
-        current_plan: str,
-    ) -> list[str]:
+    ) -> list[dict]:
         """
-        Generate search queries for the current iteration.
+        Generate search strategies for the current iteration.
 
-        This implements Perplexica's query generation strategy:
+        Each strategy includes:
+        - query: Search query string
+        - engine: Search engine to use (optional, defaults to tool default)
+        - engines: List of engines for Searxng (optional)
+        - categories: Search categories for Searxng (optional)
+        - time_range: Time filter for Searxng (optional)
+
+        This implements Perplexica's query generation strategy with Searxng enhancements:
         - Start broad, then narrow down
-        - Use reasoning in balanced/quality modes
+        - Use different engines/categories for different query types
         - Explore different angles of the topic
         """
         base_query = query.lower().strip()
 
-        # Iteration 0-1: Broad overview queries
+        # Iteration 0: Broad overview queries
         if iteration == 0:
-            return [
-                base_query,
-                f"{base_query} overview",
-                f"{base_query} introduction",
-            ][:2]
+            strategies = [
+                {
+                    "query": base_query,
+                    "engines": ["duckduckgo", "wikipedia"],
+                    "categories": ["general"],
+                },
+                {
+                    "query": f"{base_query} overview",
+                    "engines": ["duckduckgo", "brave"],
+                    "categories": ["general"],
+                },
+            ]
+            return strategies[:2] if mode == "speed" else strategies
 
         # Iteration 1+: Specialized queries based on mode
         if mode == "speed":
             # Speed mode: targeted queries only
-            return [f"{base_query} latest", f"{base_query} examples"]
+            return [
+                {"query": f"{base_query} latest"},
+                {"query": f"{base_query} examples"},
+            ]
 
-        # Balanced/Quality: Multi-angle exploration
-        query_strategies = [
-            # Features/capabilities
-            [f"{base_query} features", f"{base_query} how it works"],
-            # Comparisons
-            [f"{base_query} vs alternatives", f"{base_query} comparison"],
-            # Recent info
-            [f"{base_query} latest news", f"{base_query} 2025", f"{base_query} recent"],
+        # Balanced/Quality: Multi-angle exploration with Searxng
+        search_strategies = [
+            # Features/capabilities - general search
+            {
+                "query": f"{base_query} features",
+                "engines": ["duckduckgo", "bing"],
+                "categories": ["general"],
+            },
+            {
+                "query": f"{base_query} how it works",
+                "engines": ["duckduckgo"],
+                "categories": ["general"],
+            },
+            # Comparisons - use multiple engines for diverse perspectives
+            {
+                "query": f"{base_query} vs alternatives",
+                "engines": ["duckduckgo", "brave", "bing"],
+                "categories": ["general"],
+            },
+            {
+                "query": f"{base_query} comparison",
+                "engines": ["duckduckgo"],
+                "categories": ["general"],
+            },
+            # Recent info - use news category with time filter
+            {
+                "query": f"{base_query} latest news",
+                "engines": ["bing", "brave"],
+                "categories": ["news"],
+                "time_range": "week" if use_searxng else None,
+            },
+            {
+                "query": f"{base_query} recent",
+                "engines": ["duckduckgo"],
+                "categories": ["news"],
+                "time_range": "month" if use_searxng else None,
+            },
             # Reviews/opinions
-            [f"{base_query} review", f"{base_query} analysis"],
+            {
+                "query": f"{base_query} review",
+                "engines": ["duckduckgo", "bing"],
+                "categories": ["general"],
+            },
+            {
+                "query": f"{base_query} analysis",
+                "engines": ["brave"],
+                "categories": ["general"],
+            },
             # Use cases
-            [f"{base_query} examples", f"{base_query} use cases"],
-            # Limitations
-            [f"{base_query} problems", f"{base_query} limitations"],
+            {
+                "query": f"{base_query} examples",
+                "engines": ["duckduckgo"],
+                "categories": ["general"],
+            },
+            {
+                "query": f"{base_query} use cases",
+                "engines": ["bing"],
+                "categories": ["general"],
+            },
+            # Limitations/critiques
+            {
+                "query": f"{base_query} problems",
+                "engines": ["duckduckgo"],
+                "categories": ["general"],
+            },
+            {
+                "query": f"{base_query} limitations",
+                "engines": ["brave"],
+                "categories": ["general"],
+            },
             # Technical/deep dive
-            [f"{base_query} technical", f"{base_query} explained"],
+            {
+                "query": f"{base_query} technical",
+                "engines": ["duckduckgo"],
+                "categories": ["general"],
+            },
+            {
+                "query": f"{base_query} explained",
+                "engines": ["wikipedia", "duckduckgo"],
+                "categories": ["general"],
+            },
         ]
 
-        # Select strategy based on iteration
-        strategy_idx = (iteration - 1) % len(query_strategies)
-        return query_strategies[strategy_idx][:2]
+        # Select strategies based on iteration
+        # For quality mode, we go through all strategies
+        # For balanced mode, we skip some to stay within iteration limit
+        strategy_idx = (iteration - 1) % len(search_strategies)
+
+        # Return 1-2 strategies per iteration
+        selected = [search_strategies[strategy_idx]]
+
+        # For quality mode or early iterations, add a second strategy
+        if mode == "quality" or iteration < 3:
+            next_idx = (strategy_idx + 1) % len(search_strategies)
+            selected.append(search_strategies[next_idx])
+
+        # If not using Searxng, strip out Searxng-specific fields
+        if not use_searxng:
+            for strategy in selected:
+                strategy.pop("engines", None)
+                strategy.pop("categories", None)
+                strategy.pop("time_range", None)
+
+        return selected
 
     def _extract_findings(self, search_result: str, seen_urls: set) -> list[dict]:
         """
         Extract structured findings from search results.
 
+        Handles multiple formats:
+        - DuckDuckGo format
+        - Brave format
+        - Searxng format (includes "Engine:" field)
+
         Returns list of finding dicts with URL deduplication.
         """
         findings = []
 
-        # Parse DuckDuckGo/Brave format
+        # Parse DuckDuckGo/Brave/Searxng format
         lines = search_result.split("\n")
         current_finding = {}
 
@@ -240,16 +372,21 @@ class ResearchTool(Tool):
                             findings.append(current_finding)
                         current_finding = {"url": url, "title": "", "snippet": ""}
                 elif current_finding:
-                    # This is a snippet/description
-                    current_finding["snippet"] = line
+                    # This is a snippet/description or metadata
+                    if line.startswith("Engine:"):
+                        current_finding["engine"] = line.replace("Engine:", "").strip()
+                    elif line.startswith("Published:"):
+                        current_finding["publishedDate"] = line.replace("Published:", "").strip()
+                    else:
+                        current_finding["snippet"] = line
             # Detect result number
             elif line[0].isdigit() and "." in line[:3]:
                 if current_finding and current_finding.get("url"):
                     findings.append(current_finding)
                 title_part = line.split(".", 1)[1].strip() if "." in line else line
                 current_finding = {"title": title_part, "url": "", "snippet": ""}
-            # Detect title
-            elif not line.startswith("DuckDuckGo") and not line.startswith("Brave"):
+            # Detect title (skip engine headers)
+            elif not line.startswith("DuckDuckGo") and not line.startswith("Brave") and not line.startswith("Searxng"):
                 if current_finding and not current_finding.get("title"):
                     current_finding["title"] = line
 

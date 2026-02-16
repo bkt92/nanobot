@@ -57,8 +57,9 @@ class SubagentManager:
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
         config: "Config | None" = None,
+        web_search_config: "WebSearchConfig | None" = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, Config
+        from nanobot.config.schema import ExecToolConfig, Config, WebSearchConfig
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
@@ -67,6 +68,7 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self.config = config
+        self.web_search_config = web_search_config or WebSearchConfig()
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_info: dict[str, SubagentTaskInfo] = {}
     
@@ -165,7 +167,11 @@ class SubagentManager:
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
             ))
-            tools.register(WebSearchTool(api_key=self.brave_api_key))
+            tools.register(WebSearchTool(
+                api_key=self.brave_api_key,
+                max_results=self.web_search_config.max_results,
+                engine=self.web_search_config.engine
+            ))
             tools.register(WebFetchTool())
             # Add todo and multiedit tools for subagents
             tools.register(TodoTool(workspace, profile=profile_name))
