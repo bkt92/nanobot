@@ -360,6 +360,12 @@ def gateway(
     agent_config, workspace = _get_agent_config(config, agent_name)
     system_prompt = agent_config.system_prompt if hasattr(agent_config, 'system_prompt') else None
 
+    # Determine profile information
+    from nanobot.config.schema import AgentProfile
+    is_profile = agent_name and agent_config in config.agents.profiles.values()
+    profile_name = agent_name if is_profile else None
+    profile_config = agent_config if is_profile else None
+
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
@@ -380,6 +386,8 @@ def gateway(
         web_search_config=config.tools.web.search,
         system_prompt=system_prompt,
         config=config,
+        profile_name=profile_name,
+        profile_config=profile_config,
     )
     
     # Set cron callback (needs agent)
@@ -480,6 +488,12 @@ def agent(
     agent_config, workspace = _get_agent_config(config, agent_name)
     system_prompt = agent_config.system_prompt if hasattr(agent_config, 'system_prompt') else None
 
+    # Determine profile information
+    from nanobot.config.schema import AgentProfile
+    is_profile = agent_name and agent_config in config.agents.profiles.values()
+    profile_name = agent_name if is_profile else None
+    profile_config = agent_config if is_profile else None
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -493,6 +507,8 @@ def agent(
         web_search_config=config.tools.web.search,
         system_prompt=system_prompt,
         config=config,
+        profile_name=profile_name,
+        profile_config=profile_config,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -953,6 +969,56 @@ def status():
             else:
                 has_key = bool(p.api_key)
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+
+
+# Monitor Command
+# ============================================================================
+
+
+@app.command()
+def monitor(
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow messages in real-time"),
+    workspace: Path = typer.Option(None, "--workspace", "-w", help="Workspace path (default: from config)"),
+):
+    """Monitor agent and subagent communication."""
+    import asyncio
+    import signal
+
+    from nanobot.config.loader import load_config, get_config_path
+
+    config = load_config()
+    ws_path = workspace or config.workspace_path
+
+    if not ws_path.exists():
+        console.print(f"[red]Error:[/red] Workspace not found: {ws_path}")
+        raise typer.Exit(1)
+
+    from nanobot.cli.monitor import AgentMonitor, StaticMonitor
+
+    if follow:
+        # Real-time monitoring mode
+        monitor_instance = AgentMonitor(ws_path, console)
+
+        # Handle Ctrl+C gracefully
+        def signal_handler(sig, frame):
+            monitor_instance.stop()
+            console.print("\n[yellow]Monitor stopped[/yellow]")
+            raise typer.Exit(0)
+
+        signal.signal(signal.SIGINT, signal_handler)
+
+        console.print("[bold cyan]Real-time monitoring mode[/bold cyan]")
+        console.print("[dim]Note: File changes and subagent status will be monitored[/dim]\n")
+
+        try:
+            asyncio.run(monitor_instance.start())
+        except KeyboardInterrupt:
+            monitor_instance.stop()
+            console.print("\n[yellow]Monitor stopped[/yellow]")
+    else:
+        # Static snapshot mode
+        monitor_instance = StaticMonitor(ws_path, console)
+        monitor_instance.show()
 
 
 if __name__ == "__main__":

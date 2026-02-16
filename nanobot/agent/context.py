@@ -25,41 +25,60 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
     
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        profile: str | None = None,
+        memory_isolation: str = "shared",
+        inherit_global_skills: bool = True,
+    ) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
-        
+
         Args:
             skill_names: Optional list of skills to include.
-        
+            profile: Optional profile name for profile-specific memory and skills.
+            memory_isolation: Memory isolation mode ("shared", "isolated", "hierarchical").
+            inherit_global_skills: Whether to also load workspace and built-in skills.
+
         Returns:
             Complete system prompt.
         """
         parts = []
-        
+
         # Core identity
-        parts.append(self._get_identity())
-        
+        parts.append(self._get_identity(profile=profile))
+
         # Bootstrap files
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
-        
-        # Memory context
-        memory = self.memory.get_memory_context()
+
+        # Memory context (profile-aware)
+        memory_store = MemoryStore(self.workspace, profile=profile)
+        memory = memory_store.get_memory_context(
+            isolation=memory_isolation,
+            include_global=memory_isolation == "hierarchical",
+        )
         if memory:
             parts.append(f"# Memory\n\n{memory}")
-        
-        # Skills - progressive loading
+
+        # Skills - progressive loading (profile-aware)
+        profile_skills = SkillsLoader(
+            self.workspace,
+            profile=profile,
+            inherit_global_skills=inherit_global_skills,
+        )
+
         # 1. Always-loaded skills: include full content
-        always_skills = self.skills.get_always_skills()
+        always_skills = profile_skills.get_always_skills()
         if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
+            always_content = profile_skills.load_skills_for_context(always_skills)
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
-        
+
         # 2. Available skills: only show summary (agent uses read_file to load)
-        skills_summary = self.skills.build_skills_summary()
+        skills_summary = profile_skills.build_skills_summary()
         if skills_summary:
             parts.append(f"""# Skills
 
@@ -67,10 +86,10 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
-        
+
         return "\n\n---\n\n".join(parts)
     
-    def _get_identity(self) -> str:
+    def _get_identity(self, profile: str | None = None) -> str:
         """Get the core identity section."""
         from datetime import datetime
         import time as _time
@@ -79,7 +98,11 @@ Skills with available="false" need dependencies installed first - you can try in
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-        
+
+        profile_info = f"\n## Profile\n{profile}" if profile else ""
+        memory_path = f"{workspace_path}/memory/profiles/{profile}/MEMORY.md" if profile else f"{workspace_path}/memory/MEMORY.md"
+        history_path = f"{workspace_path}/memory/profiles/{profile}/HISTORY.md" if profile else f"{workspace_path}/memory/HISTORY.md"
+
         return f"""# nanobot 🐈
 
 You are nanobot, a helpful AI assistant. You have access to tools that allow you to:
@@ -88,7 +111,7 @@ You are nanobot, a helpful AI assistant. You have access to tools that allow you
 - Search the web and fetch web pages
 - Send messages to users on chat channels
 - Spawn subagents for complex background tasks
-
+{profile_info}
 ## Current Time
 {now} ({tz})
 
@@ -97,8 +120,8 @@ You are nanobot, a helpful AI assistant. You have access to tools that allow you
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
+- Long-term memory: {memory_path}
+- History log: {history_path} (grep-searchable)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
@@ -106,8 +129,8 @@ Only use the 'message' tool when you need to send a message to a specific chat c
 For normal conversation, just respond with text - do not call the message tool.
 
 Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
-When remembering something important, write to {workspace_path}/memory/MEMORY.md
-To recall past events, grep {workspace_path}/memory/HISTORY.md"""
+When remembering something important, write to {memory_path}
+To recall past events, grep {history_path}"""
     
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
@@ -131,6 +154,9 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         chat_id: str | None = None,
         system_prompt: str | None = None,
         profile_inherit_base: bool = True,
+        profile: str | None = None,
+        memory_isolation: str = "shared",
+        inherit_global_skills: bool = True,
     ) -> list[dict[str, Any]]:
         """
         Build the complete message list for an LLM call.
@@ -144,6 +170,9 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             chat_id: Current chat/user ID.
             system_prompt: Optional custom system prompt.
             profile_inherit_base: Whether to merge custom prompt with base prompt.
+            profile: Optional profile name for profile-specific memory.
+            memory_isolation: Memory isolation mode ("shared", "isolated", "hierarchical").
+            inherit_global_skills: Whether to also load workspace and built-in skills.
 
         Returns:
             List of messages including system prompt.
@@ -151,7 +180,12 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         messages = []
 
         # System prompt
-        base_system_prompt = self.build_system_prompt(skill_names)
+        base_system_prompt = self.build_system_prompt(
+            skill_names=skill_names,
+            profile=profile,
+            memory_isolation=memory_isolation,
+            inherit_global_skills=inherit_global_skills,
+        )
 
         # Handle custom system prompt
         if system_prompt:

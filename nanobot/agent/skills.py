@@ -13,70 +13,105 @@ BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 class SkillsLoader:
     """
     Loader for agent skills.
-    
+
     Skills are markdown files (SKILL.md) that teach the agent how to use
     specific tools or perform certain tasks.
+
+    Supports profile-specific skills with priority:
+    1. Profile-specific skills (highest priority)
+    2. Workspace skills (medium priority)
+    3. Built-in skills (fallback)
     """
-    
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
+
+    def __init__(
+        self,
+        workspace: Path,
+        builtin_skills_dir: Path | None = None,
+        profile: str | None = None,
+        inherit_global_skills: bool = True,
+    ):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
+        self.profile = profile
+        self.inherit_global_skills = inherit_global_skills
+
+        # Profile-specific skills directory
+        if profile:
+            self.profile_skills = workspace / "profiles" / profile / "skills"
+        else:
+            self.profile_skills = None
     
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
         List all available skills.
-        
+
         Args:
             filter_unavailable: If True, filter out skills with unmet requirements.
-        
+
         Returns:
             List of skill info dicts with 'name', 'path', 'source'.
         """
         skills = []
-        
-        # Workspace skills (highest priority)
-        if self.workspace_skills.exists():
-            for skill_dir in self.workspace_skills.iterdir():
+
+        # Profile-specific skills (highest priority)
+        if self.profile_skills and self.profile_skills.exists():
+            for skill_dir in self.profile_skills.iterdir():
                 if skill_dir.is_dir():
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists():
+                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "profile"})
+
+        # Workspace skills (medium priority)
+        if self.inherit_global_skills and self.workspace_skills.exists():
+            for skill_dir in self.workspace_skills.iterdir():
+                if skill_dir.is_dir():
+                    skill_file = skill_dir / "SKILL.md"
+                    if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
-        
-        # Built-in skills
-        if self.builtin_skills and self.builtin_skills.exists():
+
+        # Built-in skills (fallback)
+        if self.inherit_global_skills and self.builtin_skills and self.builtin_skills.exists():
             for skill_dir in self.builtin_skills.iterdir():
                 if skill_dir.is_dir():
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
-        
+
         # Filter by requirements
         if filter_unavailable:
-            return [s for s in skills if self._check_requirements(self._get_skill_meta(s["name"]))]
+            return [s for s in skills if self._check_requirements(self._get_skill_meta(s["name"], s.get("source")))]
         return skills
     
-    def load_skill(self, name: str) -> str | None:
+    def load_skill(self, name: str, source: str | None = None) -> str | None:
         """
         Load a skill by name.
-        
+
         Args:
             name: Skill name (directory name).
-        
+            source: Optional source hint ('profile', 'workspace', 'builtin').
+
         Returns:
             Skill content or None if not found.
         """
-        # Check workspace first
-        workspace_skill = self.workspace_skills / name / "SKILL.md"
-        if workspace_skill.exists():
-            return workspace_skill.read_text(encoding="utf-8")
-        
-        # Check built-in
-        if self.builtin_skills:
+        # Check profile-specific skills first
+        if self.profile_skills:
+            profile_skill = self.profile_skills / name / "SKILL.md"
+            if profile_skill.exists():
+                return profile_skill.read_text(encoding="utf-8")
+
+        # Check workspace skills
+        if self.inherit_global_skills:
+            workspace_skill = self.workspace_skills / name / "SKILL.md"
+            if workspace_skill.exists():
+                return workspace_skill.read_text(encoding="utf-8")
+
+        # Check built-in skills
+        if self.inherit_global_skills and self.builtin_skills:
             builtin_skill = self.builtin_skills / name / "SKILL.md"
             if builtin_skill.exists():
                 return builtin_skill.read_text(encoding="utf-8")
-        
+
         return None
     
     def load_skills_for_context(self, skill_names: list[str]) -> str:
@@ -185,9 +220,9 @@ class SkillsLoader:
                 return False
         return True
     
-    def _get_skill_meta(self, name: str) -> dict:
+    def _get_skill_meta(self, name: str, source: str | None = None) -> dict:
         """Get nanobot metadata for a skill (cached in frontmatter)."""
-        meta = self.get_skill_metadata(name) or {}
+        meta = self.get_skill_metadata(name, source) or {}
         return self._parse_nanobot_metadata(meta.get("metadata", ""))
     
     def get_always_skills(self) -> list[str]:
@@ -200,20 +235,21 @@ class SkillsLoader:
                 result.append(s["name"])
         return result
     
-    def get_skill_metadata(self, name: str) -> dict | None:
+    def get_skill_metadata(self, name: str, source: str | None = None) -> dict | None:
         """
         Get metadata from a skill's frontmatter.
-        
+
         Args:
             name: Skill name.
-        
+            source: Optional source hint ('profile', 'workspace', 'builtin').
+
         Returns:
             Metadata dict or None.
         """
-        content = self.load_skill(name)
+        content = self.load_skill(name, source)
         if not content:
             return None
-        
+
         if content.startswith("---"):
             match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
             if match:
@@ -224,5 +260,5 @@ class SkillsLoader:
                         key, value = line.split(":", 1)
                         metadata[key.strip()] = value.strip().strip('"\'')
                 return metadata
-        
+
         return None

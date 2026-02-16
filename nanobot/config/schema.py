@@ -198,6 +198,14 @@ class AgentProfile(BaseModel):
     # Workspace configuration
     workspace: str | None = None  # None = use default workspace
 
+    # Memory configuration
+    memory_isolation: str = "shared"  # "shared", "isolated", "hierarchical"
+    share_to_global: bool = True     # Push important memories to global memory
+    inherit_from_global: bool = True  # Pull from global memory in hierarchical mode
+
+    # Skills configuration
+    inherit_global_skills: bool = True  # Also load workspace and built-in skills
+
 
 class AgentsConfig(BaseModel):
     """Agent configuration."""

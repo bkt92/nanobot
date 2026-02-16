@@ -20,6 +20,10 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.profiles import ListProfilesTool
+from nanobot.agent.tools.multiedit import MultiEditTool
+from nanobot.agent.tools.todo import TodoTool
+from nanobot.agent.tools.list_subagents import ListSubagentsTool
+from nanobot.agent.tools.cancel_subagents import CancelSubagentsTool
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
@@ -53,8 +57,10 @@ class AgentLoop:
         web_search_config: "WebSearchConfig | None" = None,
         system_prompt: str | None = None,
         config: "Config | None" = None,
+        profile_name: str | None = None,
+        profile_config: "AgentProfile | None" = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, WebSearchConfig, Config
+        from nanobot.config.schema import ExecToolConfig, WebSearchConfig, Config, AgentProfile
         from nanobot.cron.service import CronService
         self.bus = bus
         self.provider = provider
@@ -69,6 +75,19 @@ class AgentLoop:
         self.web_search_config = web_search_config or WebSearchConfig()
         self._custom_system_prompt = system_prompt
         self.config = config
+
+        # Profile support
+        self.profile_name = profile_name
+        self.profile_config = profile_config
+        # Get settings from profile or defaults
+        if profile_config:
+            self.memory_isolation = profile_config.memory_isolation
+            self.profile_inherit_base = profile_config.inherit_base_prompt
+            self.inherit_global_skills = profile_config.inherit_global_skills
+        else:
+            self.memory_isolation = "shared"
+            self.profile_inherit_base = True
+            self.inherit_global_skills = True
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -95,14 +114,20 @@ class AgentLoop:
         self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
         self.tools.register(EditFileTool(allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(allowed_dir=allowed_dir))
-        
+
+        # Multi-file edit tool
+        self.tools.register(MultiEditTool(allowed_dir=allowed_dir))
+
+        # Todo list tool
+        self.tools.register(TodoTool(self.workspace, profile=self.profile_name))
+
         # Shell tool
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
         ))
-        
+
         # Web tools
         self.tools.register(WebSearchTool(
             api_key=self.brave_api_key,
@@ -115,11 +140,17 @@ class AgentLoop:
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
-        
+
         # Spawn tool (for subagents)
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
-        
+
+        # List subagents tool
+        self.tools.register(ListSubagentsTool(manager=self.subagents))
+
+        # Cancel subagents tool
+        self.tools.register(CancelSubagentsTool(manager=self.subagents))
+
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
@@ -204,14 +235,18 @@ class AgentLoop:
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(msg.channel, msg.chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
+
+        todo_tool = self.tools.get("todo")
+        if isinstance(todo_tool, TodoTool):
+            todo_tool.set_context(self.profile_name or "")
         
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
@@ -221,6 +256,10 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
             system_prompt=self._custom_system_prompt,
+            profile=self.profile_name,
+            memory_isolation=self.memory_isolation,
+            profile_inherit_base=self.profile_inherit_base,
+            inherit_global_skills=self.inherit_global_skills,
         )
         
         # Agent loop
@@ -323,14 +362,18 @@ class AgentLoop:
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(origin_channel, origin_chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(origin_channel, origin_chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
+
+        todo_tool = self.tools.get("todo")
+        if isinstance(todo_tool, TodoTool):
+            todo_tool.set_context(self.profile_name or "")
         
         # Build messages with the announce content
         messages = self.context.build_messages(
@@ -339,6 +382,10 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
             system_prompt=self._custom_system_prompt,
+            profile=self.profile_name,
+            memory_isolation=self.memory_isolation,
+            profile_inherit_base=self.profile_inherit_base,
+            inherit_global_skills=self.inherit_global_skills,
         )
         
         # Agent loop (limited for announce handling)
@@ -402,7 +449,14 @@ class AgentLoop:
         """Consolidate old messages into MEMORY.md + HISTORY.md, then trim session."""
         if not session.messages:
             return
-        memory = MemoryStore(self.workspace)
+
+        # Use profile-specific memory if profile is set
+        profile = self.profile_name if self.memory_isolation != "shared" else None
+        memory = MemoryStore(self.workspace, profile=profile)
+
+        # Also get global memory for share_to_global logic
+        global_memory = MemoryStore(self.workspace) if profile and self.profile_config and self.profile_config.share_to_global else None
+
         if archive_all:
             old_messages = session.messages
             keep_count = 0
@@ -421,13 +475,17 @@ class AgentLoop:
             tools = f" [tools: {', '.join(m['tools_used'])}]" if m.get("tools_used") else ""
             lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}")
         conversation = "\n".join(lines)
-        current_memory = memory.read_long_term()
+        current_memory = memory.read_long_term(include_global=False)
 
+        # Build consolidation prompt with profile context
+        profile_hint = f"\nNOTE: This is for profile '{self.profile_name}'. Focus on facts relevant to this profile's context." if profile else ""
         prompt = f"""You are a memory consolidation agent. Process this conversation and return a JSON object with exactly two keys:
 
 1. "history_entry": A paragraph (2-5 sentences) summarizing the key events/decisions/topics. Start with a timestamp like [YYYY-MM-DD HH:MM]. Include enough detail to be useful when found by grep search later.
 
 2. "memory_update": The updated long-term memory content. Add any new facts: user location, preferences, personal info, habits, project context, technical decisions, tools/services used. If nothing new, return the existing content unchanged.
+
+3. "global_memory_update" (optional): Only include if there are facts that should be shared across all profiles (e.g., critical user preferences, global settings). Otherwise omit this key.{profile_hint}
 
 ## Current Long-term Memory
 {current_memory or "(empty)"}
@@ -455,6 +513,15 @@ Respond with ONLY valid JSON, no markdown fences."""
             if update := result.get("memory_update"):
                 if update != current_memory:
                     memory.write_long_term(update)
+
+            # Handle global memory update if share_to_global is enabled
+            if global_memory:
+                global_update = result.get("global_memory_update")
+                if global_update:
+                    current_global = global_memory.read_global_memory()
+                    if global_update != current_global:
+                        global_memory.write_global_memory(global_update)
+                        logger.info(f"Shared key facts to global memory from profile '{self.profile_name}'")
 
             session.messages = session.messages[-keep_count:] if keep_count else []
             self.sessions.save(session)
