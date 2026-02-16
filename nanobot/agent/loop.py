@@ -24,6 +24,7 @@ from nanobot.agent.tools.multiedit import MultiEditTool
 from nanobot.agent.tools.todo import TodoTool
 from nanobot.agent.tools.list_subagents import ListSubagentsTool
 from nanobot.agent.tools.cancel_subagents import CancelSubagentsTool
+from nanobot.agent.tools.research import ResearchTool
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
@@ -101,6 +102,7 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             config=config,
+            web_search_config=self.web_search_config,
         )
         
         self._running = False
@@ -135,6 +137,12 @@ class AgentLoop:
             engine=self.web_search_config.engine
         ))
         self.tools.register(WebFetchTool())
+
+        # Research tool (Perplexica-style deep research)
+        self.tools.register(ResearchTool(
+            api_key=self.brave_api_key,
+            max_results=self.web_search_config.max_results
+        ))
 
 
         # Message tool
