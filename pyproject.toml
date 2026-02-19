@@ -40,6 +40,7 @@ dependencies = [
     "prompt-toolkit>=3.0.0",
     "ddgs>=9.0.0",
     "matrix-nio>=0.24.0",
+    "camoufox>=0.4.11",
 ]
 
 [project.optional-dependencies]

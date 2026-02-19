@@ -25,6 +25,7 @@ from nanobot.agent.tools.todo import TodoTool
 from nanobot.agent.tools.list_subagents import ListSubagentsTool
 from nanobot.agent.tools.cancel_subagents import CancelSubagentsTool
 from nanobot.agent.tools.research import ResearchTool
+from nanobot.agent.tools.camoufox_browser import CamoufoxBrowserTool
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
@@ -144,6 +145,8 @@ class AgentLoop:
             max_results=self.web_search_config.max_results
         ))
 
+        # Camoufox anti-detect browser tool
+        self.tools.register(CamoufoxBrowserTool())
 
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
@@ -325,7 +328,12 @@ class AgentLoop:
                 final_content = f"Reached {self.max_iterations} iterations without completion."
             else:
                 final_content = "I've completed processing but have no response to give."
-        
+
+        # Ensure final_content is never empty
+        if not final_content or not final_content.strip():
+            logger.warning(f"LLM returned empty response for {msg.channel}:{msg.sender_id}, using fallback")
+            final_content = "I apologize, but I wasn't able to generate a response. This could be due to an issue with the language model or the search results. Please try rephrasing your request."
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
@@ -441,7 +449,12 @@ class AgentLoop:
         
         if final_content is None:
             final_content = "Background task completed."
-        
+
+        # Ensure final_content is never empty for system messages too
+        if not final_content or not final_content.strip():
+            logger.warning(f"System message processing returned empty response, using fallback")
+            final_content = "Background task completed (no detailed response available)."
+
         # Save to session (mark as system message in history)
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
         session.add_message("assistant", final_content)
