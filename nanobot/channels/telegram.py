@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import re
+from pathlib import Path
+
 from loguru import logger
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -180,7 +183,7 @@ class TelegramChannel(BaseChannel):
             self._app = None
     
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Telegram."""
+        """Send a message through Telegram (supports text and images/media)."""
         if not self._app:
             logger.warning("Telegram bot not running")
             return
@@ -189,41 +192,83 @@ class TelegramChannel(BaseChannel):
         self._stop_typing(msg.chat_id)
 
         try:
-            # chat_id should be the Telegram chat ID (integer)
             chat_id = int(msg.chat_id)
-            # Convert markdown to Telegram HTML
-            html_content = _markdown_to_telegram_html(msg.content)
 
-            # Split message if it exceeds Telegram's 4096 character limit
-            chunks = split_telegram_message(html_content, limit=4096)
+            # Send media attachments first (photos, audio, documents, etc.)
+            if msg.media:
+                for media_path in msg.media:
+                    try:
+                        path = Path(media_path)
+                        if not path.exists():
+                            logger.warning(f"Media file not found: {media_path}")
+                            continue
 
-            for i, chunk in enumerate(chunks):
-                await self._app.bot.send_message(
-                    chat_id=chat_id,
-                    text=chunk,
-                    parse_mode="HTML"
-                )
-                # Small delay between chunks to avoid rate limiting
-                if i < len(chunks) - 1:
-                    await asyncio.sleep(0.5)
+                        # Detect file type from MIME
+                        mime, _ = mimetypes.guess_type(str(path))
+                        if not mime:
+                            mime = ""
+
+                        # Determine file type and use appropriate send method
+                        with open(path, "rb") as f:
+                            if mime.startswith("image/"):
+                                # Send as photo (with preview, no download required)
+                                await self._app.bot.send_photo(chat_id=chat_id, photo=f)
+                                logger.debug(f"Sent photo: {media_path}")
+
+                            elif mime.startswith("audio/"):
+                                # Send as audio (with player, duration display)
+                                # Extract filename without extension for title
+                                title = path.stem
+                                await self._app.bot.send_audio(
+                                    chat_id=chat_id,
+                                    audio=f,
+                                    title=title
+                                )
+                                logger.debug(f"Sent audio: {media_path}")
+
+                            elif mime.startswith("video/"):
+                                # Send as video (with preview, player controls)
+                                await self._app.bot.send_video(chat_id=chat_id, video=f)
+                                logger.debug(f"Sent video: {media_path}")
+
+                            else:
+                                # Send as generic document
+                                await self._app.bot.send_document(chat_id=chat_id, document=f)
+                                logger.debug(f"Sent document: {media_path}")
+
+                        # Small delay between media files
+                        await asyncio.sleep(0.3)
+                    except Exception as e:
+                        logger.error(f"Failed to send media {media_path}: {e}")
+
+            # Send text content
+            if msg.content and msg.content.strip():
+                # Convert markdown to Telegram HTML
+                html_content = _markdown_to_telegram_html(msg.content)
+
+                # Validate HTML conversion didn't produce empty content
+                if not html_content or not html_content.strip():
+                    html_content = msg.content
+
+                # Split message if it exceeds Telegram's 4096 character limit
+                chunks = split_telegram_message(html_content, limit=4096)
+
+                for i, chunk in enumerate(chunks):
+                    if not chunk or not chunk.strip():
+                        continue
+                    await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        parse_mode="HTML"
+                    )
+                    # Small delay between chunks to avoid rate limiting
+                    if i < len(chunks) - 1:
+                        await asyncio.sleep(0.5)
 
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
         except Exception as e:
-            # Fallback to plain text if HTML parsing fails
-            logger.warning(f"HTML parse failed, falling back to plain text: {e}")
-            try:
-                # Also split plain text if needed
-                plain_chunks = split_telegram_message(msg.content, limit=4096)
-                for i, chunk in enumerate(plain_chunks):
-                    await self._app.bot.send_message(
-                        chat_id=int(msg.chat_id),
-                        text=chunk
-                    )
-                    if i < len(plain_chunks) - 1:
-                        await asyncio.sleep(0.5)
-            except Exception as e2:
-                logger.error(f"Error sending Telegram message: {e2}")
+            logger.error(f"Error sending Telegram message: {e}")
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""
