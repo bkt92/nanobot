@@ -174,10 +174,14 @@ class ResearchTool(Tool):
 
                 # Check if we should stop early
                 if self._should_stop_early(iteration, iteration_findings, mode):
-                    logger.debug(f"Stopping early at iteration {iteration + 1}")
+                    logger.debug(f"Stopping early at iteration {iteration + 1} (no new findings)")
                     break
 
             # Synthesize findings
+            logger.info(f"Research completed: {len(all_findings)} total findings across {len(search_history)} iterations")
+            if not all_findings:
+                logger.warning(f"Research produced no findings for query: {query}")
+
             return self._synthesize_results(query, all_findings, search_history, mode)
 
         except Exception as e:
@@ -214,18 +218,18 @@ class ResearchTool(Tool):
         """
         base_query = query.lower().strip()
 
-        # Iteration 0: Broad overview queries
+        # Iteration 0: Broad overview queries - let Searxng use all engines for diverse results
         if iteration == 0:
             strategies = [
                 {
                     "query": base_query,
-                    "engines": ["duckduckgo", "wikipedia"],
-                    "categories": ["general"],
+                    "engines": None,  # Let Searxng decide - use all available engines
+                    "categories": None,
                 },
                 {
                     "query": f"{base_query} overview",
-                    "engines": ["duckduckgo", "brave"],
-                    "categories": ["general"],
+                    "engines": None,  # Let Searxng decide - use all available engines
+                    "categories": None,
                 },
             ]
             return strategies[:2] if mode == "speed" else strategies
@@ -356,48 +360,61 @@ class ResearchTool(Tool):
         """
         findings = []
 
+        if not search_result or search_result.startswith("Error:"):
+            logger.warning(f"Search returned no results or error: {search_result[:100]}")
+            return findings
+
         # Parse DuckDuckGo/Brave/Searxng format
         lines = search_result.split("\n")
         current_finding = {}
 
-        for line in lines:
-            line = line.strip()
-            if not line:
+        for raw_line in lines:
+            # Skip empty lines
+            stripped = raw_line.strip()
+            if not stripped:
                 continue
 
-            # Detect URL lines (indented with spaces)
-            if line.startswith("   ") or line.startswith("\t"):
-                url = line.strip()
-                if url.startswith("http"):
-                    # Check for duplicate
-                    if url not in seen_urls:
-                        seen_urls.add(url)
-                        if current_finding:
-                            findings.append(current_finding)
-                        current_finding = {"url": url, "title": "", "snippet": ""}
+            # Detect URL lines (indented with spaces) - check original line
+            if raw_line.startswith("   ") or raw_line.startswith("\t"):
+                # This is an indented line (URL, snippet, or metadata)
+                if stripped.startswith("http"):
+                    # This is a URL - add to current finding or check for duplicate
+                    if stripped not in seen_urls:
+                        seen_urls.add(stripped)
+                        # If we already have a finding with title, add URL to it
+                        if current_finding and current_finding.get("title") and not current_finding.get("url"):
+                            current_finding["url"] = stripped
+                        else:
+                            # This is a new finding (URL-first format)
+                            if current_finding and current_finding.get("url"):
+                                findings.append(current_finding)
+                            current_finding = {"url": stripped, "title": "", "snippet": ""}
+                    # Duplicate URL - skip this result
                 elif current_finding:
                     # This is a snippet/description or metadata
-                    if line.startswith("Engine:"):
-                        current_finding["engine"] = line.replace("Engine:", "").strip()
-                    elif line.startswith("Published:"):
-                        current_finding["publishedDate"] = line.replace("Published:", "").strip()
+                    if stripped.startswith("Engine:"):
+                        current_finding["engine"] = stripped.replace("Engine:", "").strip()
+                    elif stripped.startswith("Published:"):
+                        current_finding["publishedDate"] = stripped.replace("Published:", "").strip()
                     else:
-                        current_finding["snippet"] = line
-            # Detect result number
-            elif line[0].isdigit() and "." in line[:3]:
+                        current_finding["snippet"] = stripped
+            # Detect result number (e.g., "1. Title")
+            elif stripped[0].isdigit() and "." in stripped[:3]:
+                # Save previous finding if it has a URL
                 if current_finding and current_finding.get("url"):
                     findings.append(current_finding)
-                title_part = line.split(".", 1)[1].strip() if "." in line else line
+                title_part = stripped.split(".", 1)[1].strip() if "." in stripped else stripped
                 current_finding = {"title": title_part, "url": "", "snippet": ""}
             # Detect title (skip engine headers)
-            elif not line.startswith("DuckDuckGo") and not line.startswith("Brave") and not line.startswith("Searxng"):
+            elif not stripped.startswith("DuckDuckGo") and not stripped.startswith("Brave") and not stripped.startswith("Searxng"):
                 if current_finding and not current_finding.get("title"):
-                    current_finding["title"] = line
+                    current_finding["title"] = stripped
 
-        # Add last finding
+        # Add last finding if it has a URL
         if current_finding and current_finding.get("url"):
             findings.append(current_finding)
 
+        logger.debug(f"Extracted {len(findings)} findings from search result")
         return findings
 
     def _should_stop_early(
@@ -483,6 +500,33 @@ class ResearchTool(Tool):
         if len(findings) > 10:
             summary_lines.append(f"*... and {len(findings) - 10} more sources*")
 
+        # Add a message if no findings were found
+        if not findings:
+            summary_lines.extend([
+                f"",
+                f"No specific sources were found for this query. This could be due to:",
+                f"- Search engine connectivity issues",
+                f"- The query may be too specific or unclear",
+                f"- Rate limiting on search engines",
+                f"",
+                f"**Suggestions:**",
+                f"- Try rephrasing your query with different keywords",
+                f"- Try using the 'speed' mode for quicker results",
+                f"- Check if the search engines are accessible",
+            ])
+
         result["summary"] = "\n".join(summary_lines)
 
-        return json.dumps(result, indent=2)
+        # Ensure we never return empty content
+        json_output = json.dumps(result, indent=2, ensure_ascii=False)
+        if not json_output or json_output == "{}":
+            logger.error("Research synthesis produced empty output, returning fallback")
+            return json.dumps({
+                "query": query,
+                "mode": mode,
+                "timestamp": timestamp,
+                "error": "Research synthesis failed - no output generated",
+                "summary": f"# Research Results: {query}\n\nUnable to generate research report. Please try again.",
+            }, ensure_ascii=False)
+
+        return json_output
