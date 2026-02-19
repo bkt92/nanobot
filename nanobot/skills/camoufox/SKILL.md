@@ -151,7 +151,8 @@ User: "Show me what example.com looks like"
 → Use camoufox_browse with:
    - url="https://example.com"
    - screenshot=true
-→ The response will include a base64-encoded PNG screenshot
+→ The response will include the screenshot file path
+→ To send via Telegram: message(content="Here's the screenshot", media=["/path/to/screenshot.png"])
 ```
 
 ### Evaluate JavaScript
@@ -176,8 +177,7 @@ The tool returns JSON with:
   "text_truncated": false,
   "html": "<html>...</html>",
   "html_truncated": false,
-  "screenshot": "base64-encoded-image",
-  "screenshot_format": "png",
+  "screenshot_path": "/home/user/.nanobot/screenshots/camoufox_abc123_123456.png",
   "actions": [
     {"type": "fill", "selector": "...", "success": true}
   ]

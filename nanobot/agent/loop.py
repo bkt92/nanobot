@@ -146,7 +146,7 @@ class AgentLoop:
         ))
 
         # Camoufox anti-detect browser tool
-        self.tools.register(CamoufoxBrowserTool())
+        self.tools.register(CamoufoxBrowserTool(workspace=self.workspace))
 
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)

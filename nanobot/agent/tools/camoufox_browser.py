@@ -6,6 +6,7 @@ browser built on Firefox that evades bot detection systems.
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -102,17 +103,24 @@ class CamoufoxBrowserTool(Tool):
         "required": ["url"],
     }
 
-    def __init__(self, headless: bool = True, timeout: int = 30000):
+    def __init__(self, headless: bool = True, timeout: int = 30000, workspace: Path | None = None):
         """
         Initialize Camoufox browser tool.
 
         Args:
             headless: Run browser in headless mode (default: true)
             timeout: Default navigation timeout in milliseconds
+            workspace: Workspace directory for saving screenshots (defaults to ~/.nanobot/screenshots)
         """
         self.headless = headless
         self.timeout = timeout
         self._available = CAMOUFOX_AVAILABLE
+        # Set up screenshot directory
+        if workspace:
+            self.screenshot_dir = workspace / "screenshots"
+        else:
+            self.screenshot_dir = Path.home() / ".nanobot" / "screenshots"
+        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
 
     async def execute(
         self,
@@ -162,13 +170,8 @@ class CamoufoxBrowserTool(Tool):
         logger.info(f"Camoufox browsing: {url} (headless={use_headless})")
 
         try:
-            # Configure Camoufox
-            config = {
-                "headless": use_headless,
-            }
-
-            # Create browser session
-            async with AsyncCamoufox(config=config) as browser:
+            # Create browser session - pass headless directly as launch option
+            async with AsyncCamoufox(headless=use_headless) as browser:
                 page = await browser.new_page()
 
                 # Navigate to URL
@@ -227,9 +230,19 @@ class CamoufoxBrowserTool(Tool):
                 if screenshot:
                     try:
                         screenshot_bytes = await page.screenshot(full_page=False)
-                        import base64
-                        result["screenshot"] = base64.b64encode(screenshot_bytes).decode("utf-8")
-                        result["screenshot_format"] = "png"
+                        # Save screenshot to disk
+                        import hashlib
+                        # Generate filename from URL hash + timestamp
+                        url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+                        timestamp = asyncio.get_event_loop().time()
+                        filename = f"camoufox_{url_hash}_{int(timestamp)}.png"
+                        screenshot_path = self.screenshot_dir / filename
+
+                        with open(screenshot_path, "wb") as f:
+                            f.write(screenshot_bytes)
+
+                        result["screenshot_path"] = str(screenshot_path)
+                        logger.info(f"Screenshot saved to {screenshot_path}")
                     except Exception as e:
                         logger.warning(f"Failed to take screenshot: {e}")
 
@@ -283,10 +296,19 @@ class CamoufoxBrowserTool(Tool):
                     result["result"] = eval_result
 
             elif action_type == "screenshot":
-                import base64
+                import hashlib
                 screenshot_bytes = await page.screenshot(full_page=False)
+                # Save screenshot to disk
+                url_hash = hashlib.md5(str(action).encode()).hexdigest()[:8]
+                timestamp = asyncio.get_event_loop().time()
+                filename = f"action_{url_hash}_{int(timestamp)}.png"
+                screenshot_path = self.screenshot_dir / filename
+
+                with open(screenshot_path, "wb") as f:
+                    f.write(screenshot_bytes)
+
                 result["success"] = True
-                result["screenshot"] = base64.b64encode(screenshot_bytes).decode("utf-8")
+                result["screenshot_path"] = str(screenshot_path)
                 result["format"] = "png"
 
             else:
