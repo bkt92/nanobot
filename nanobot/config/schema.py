@@ -190,10 +190,27 @@ class AgentDefaults(Base):
     memory_window: int = 50
 
 
+class AgentProfile(Base):
+    """Named agent profile configuration."""
+
+    model: str | None = None  # Override default model
+    temperature: float | None = None  # Override default temperature
+    max_tokens: int | None = None  # Override default max tokens
+    max_tool_iterations: int | None = None  # Override default max tool iterations
+    memory_window: int | None = None  # Override default memory window
+    system_prompt: str | None = None  # Custom system prompt (persona)
+    inherit_base_prompt: bool = True  # Merge with base prompt (True) or replace (False)
+    workspace: str | None = None  # Custom workspace path (null = use default)
+    memory_isolation: str = "shared"  # Memory isolation: "shared", "isolated", or "hierarchical"
+    inherit_global_skills: bool = True  # Whether to also load workspace and built-in skills
+    share_to_global: bool = False  # If true, share key facts to global memory
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    profiles: dict[str, AgentProfile] = Field(default_factory=dict)  # Named agent profiles
 
 
 class ProviderConfig(Base):

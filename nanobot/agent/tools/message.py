@@ -73,7 +73,6 @@ class MessageTool(Tool):
     async def execute(
         self,
         content: str,
-        media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
         message_id: str | None = None,

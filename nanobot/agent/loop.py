@@ -54,8 +54,12 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
+        system_prompt: str | None = None,
+        config: "Config | None" = None,
+        profile_name: str | None = None,
+        profile_config: "AgentProfile | None" = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
+        from nanobot.config.schema import ExecToolConfig, Config, AgentProfile
         from nanobot.cron.service import CronService
         self.bus = bus
         self.provider = provider
@@ -69,6 +73,21 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self._custom_system_prompt = system_prompt
+        self.config = config
+
+        # Profile support
+        self.profile_name = profile_name
+        self.profile_config = profile_config
+        # Get settings from profile or defaults
+        if profile_config:
+            self.memory_isolation = profile_config.memory_isolation
+            self.profile_inherit_base = profile_config.inherit_base_prompt
+            self.inherit_global_skills = profile_config.inherit_global_skills
+        else:
+            self.memory_isolation = "shared"
+            self.profile_inherit_base = True
+            self.inherit_global_skills = True
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -83,8 +102,9 @@ class AgentLoop:
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            config=config,
         )
-        
+
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
@@ -100,29 +120,41 @@ class AgentLoop:
         self.tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
-        
+
         # Shell tool
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
         ))
-        
+
         # Web tools
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
-        
+
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
-        
+
         # Spawn tool (for subagents)
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
-        
+
+        # List subagents tool
+        from nanobot.agent.tools.list_subagents import ListSubagentsTool
+        self.tools.register(ListSubagentsTool(manager=self.subagents))
+
+        # Cancel subagents tool
+        from nanobot.agent.tools.cancel_subagents import CancelSubagentsTool
+        self.tools.register(CancelSubagentsTool(manager=self.subagents))
+
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # List profiles tool
+        from nanobot.agent.tools.profiles import ListProfilesTool
+        self.tools.register(ListProfilesTool(config=self.config))
     
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -351,6 +383,11 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
+            system_prompt=self._custom_system_prompt,
+            profile=self.profile_name,
+            memory_isolation=self.memory_isolation,
+            profile_inherit_base=self.profile_inherit_base,
+            inherit_global_skills=self.inherit_global_skills,
         )
 
         async def _bus_progress(content: str) -> None:
@@ -408,6 +445,11 @@ class AgentLoop:
             current_message=msg.content,
             channel=origin_channel,
             chat_id=origin_chat_id,
+            system_prompt=self._custom_system_prompt,
+            profile=self.profile_name,
+            memory_isolation=self.memory_isolation,
+            profile_inherit_base=self.profile_inherit_base,
+            inherit_global_skills=self.inherit_global_skills,
         )
         final_content, _ = await self._run_agent_loop(initial_messages)
 
@@ -431,7 +473,15 @@ class AgentLoop:
             archive_all: If True, clear all messages and reset session (for /new command).
                        If False, only write to files without modifying session.
         """
-        memory = MemoryStore(self.workspace)
+        if not session.messages:
+            return
+
+        # Use profile-specific memory if profile is set
+        profile = self.profile_name if self.memory_isolation != "shared" else None
+        memory = MemoryStore(self.workspace, profile=profile)
+
+        # Also get global memory for share_to_global logic
+        global_memory = MemoryStore(self.workspace) if profile and self.profile_config and self.profile_config.share_to_global else None
 
         if archive_all:
             old_messages = session.messages
@@ -460,13 +510,17 @@ class AgentLoop:
             tools = f" [tools: {', '.join(m['tools_used'])}]" if m.get("tools_used") else ""
             lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}")
         conversation = "\n".join(lines)
-        current_memory = memory.read_long_term()
+        current_memory = memory.read_long_term(include_global=False)
 
+        # Build consolidation prompt with profile context
+        profile_hint = f"\nNOTE: This is for profile '{self.profile_name}'. Focus on facts relevant to this profile's context." if profile else ""
         prompt = f"""You are a memory consolidation agent. Process this conversation and return a JSON object with exactly two keys:
 
 1. "history_entry": A paragraph (2-5 sentences) summarizing the key events/decisions/topics. Start with a timestamp like [YYYY-MM-DD HH:MM]. Include enough detail to be useful when found by grep search later.
 
 2. "memory_update": The updated long-term memory content. Add any new facts: user location, preferences, personal info, habits, project context, technical decisions, tools/services used. If nothing new, return the existing content unchanged.
+
+3. "global_memory_update" (optional): Only include if there are facts that should be shared across all profiles (e.g., critical user preferences, global settings). Otherwise omit this key.{profile_hint}
 
 ## Current Long-term Memory
 {current_memory or "(empty)"}
@@ -514,6 +568,15 @@ Respond with ONLY valid JSON, no markdown fences."""
                     update = json.dumps(update, ensure_ascii=False)
                 if update != current_memory:
                     memory.write_long_term(update)
+
+            # Handle global memory update if share_to_global is enabled
+            if global_memory:
+                global_update = result.get("global_memory_update")
+                if global_update:
+                    current_global = global_memory.read_global_memory()
+                    if global_update != current_global:
+                        global_memory.write_global_memory(global_update)
+                        logger.info("Shared key facts to global memory from profile '{}'", self.profile_name)
 
             if archive_all:
                 session.last_consolidated = 0

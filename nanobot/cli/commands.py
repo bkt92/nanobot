@@ -279,6 +279,32 @@ This file stores important information that should persist across sessions.
     skills_dir.mkdir(exist_ok=True)
 
 
+def _get_agent_config(config: Config, profile_name: str | None):
+    """Get agent configuration from profile or defaults.
+
+    Returns:
+        Tuple of (agent_config, system_prompt, profile_name, profile_config)
+    """
+    from nanobot.config.schema import AgentDefaults
+
+    if profile_name and profile_name in config.agents.profiles:
+        profile_config = config.agents.profiles[profile_name]
+        agent_config = AgentDefaults(
+            workspace=profile_config.workspace or config.agents.defaults.workspace,
+            model=profile_config.model or config.agents.defaults.model,
+            temperature=profile_config.temperature or config.agents.defaults.temperature,
+            max_tokens=profile_config.max_tokens or config.agents.defaults.max_tokens,
+            max_tool_iterations=profile_config.max_tool_iterations or config.agents.defaults.max_tool_iterations,
+            memory_window=profile_config.memory_window or config.agents.defaults.memory_window,
+        )
+        system_prompt = profile_config.system_prompt
+        return agent_config, system_prompt, profile_name, profile_config
+    else:
+        if profile_name:
+            console.print(f"[yellow]Warning: Profile '{profile_name}' not found, using defaults[/yellow]")
+        return config.agents.defaults, None, None, None
+
+
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
     from nanobot.providers.litellm_provider import LiteLLMProvider
@@ -326,6 +352,7 @@ def _make_provider(config: Config):
 def gateway(
     port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    agent: str = typer.Option(None, "--agent", "-a", help="Agent profile to use"),
 ):
     """Start the nanobot gateway."""
     from nanobot.config.loader import load_config, get_data_dir
@@ -336,38 +363,45 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
-    
+
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
-    
+
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
-    
+
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
-    
+
+    # Get agent configuration (profile or defaults)
+    agent_config, system_prompt, profile_name, profile_config = _get_agent_config(config, agent)
+
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
-    
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
         provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
+        workspace=agent_config.workspace or config.workspace_path,
+        model=agent_config.model,
+        temperature=agent_config.temperature,
+        max_tokens=agent_config.max_tokens,
+        max_iterations=agent_config.max_tool_iterations,
+        memory_window=agent_config.memory_window,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
+        system_prompt=system_prompt,
+        config=config,
+        profile_name=profile_name,
+        profile_config=profile_config,
     )
     
     # Set cron callback (needs agent)
@@ -448,6 +482,7 @@ def agent(
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    agent_profile: str = typer.Option(None, "--agent", "-a", help="Agent profile to use"),
 ):
     """Interact with the agent directly."""
     from nanobot.config.loader import load_config, get_data_dir
@@ -455,9 +490,9 @@ def agent(
     from nanobot.agent.loop import AgentLoop
     from nanobot.cron.service import CronService
     from loguru import logger
-    
+
     config = load_config()
-    
+
     bus = MessageBus()
     provider = _make_provider(config)
 
@@ -469,21 +504,29 @@ def agent(
         logger.enable("nanobot")
     else:
         logger.disable("nanobot")
-    
+
+    # Get agent configuration (profile or defaults)
+    agent_config, system_prompt, profile_name, profile_config = _get_agent_config(config, agent_profile)
+    is_profile = bool(profile_name)
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
+        workspace=agent_config.workspace or config.workspace_path,
+        model=agent_config.model,
+        temperature=agent_config.temperature,
+        max_tokens=agent_config.max_tokens,
+        max_iterations=agent_config.max_tool_iterations,
+        memory_window=agent_config.memory_window,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
+        system_prompt=system_prompt,
+        config=config,
+        profile_name=profile_name,
+        profile_config=profile_config,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
