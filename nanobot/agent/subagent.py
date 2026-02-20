@@ -344,6 +344,54 @@ Skills are available at: {self.workspace}/skills/ (read SKILL.md files as needed
 
 When you have completed the task, provide a clear summary of your findings or actions."""
 
+    async def _announce_result(
+        self,
+        task_id: str,
+        label: str,
+        task: str,
+        result: str,
+        origin: dict[str, str],
+        status: str,
+    ) -> None:
+        """Announce the subagent result to the main agent via the message bus."""
+        from nanobot.config.loader import get_data_dir
+        from datetime import datetime
+
+        status_text = "completed successfully" if status == "ok" else "failed"
+
+        announce_content = f"""[Subagent '{label}' {status_text}]
+
+Task: {task}
+
+Result:
+{result}
+
+Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
+
+        # Log to monitor
+        try:
+            monitor_dir = get_data_dir() / "monitor"
+            monitor_dir.mkdir(parents=True, exist_ok=True)
+            monitor_file = monitor_dir / "messages.log"
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            session = f"{origin['channel']}:{origin['chat_id']}"
+            log_entry = f"[{timestamp}] [subagent session:{session}] {label}: {result[:200]}\n"
+            with open(monitor_file, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+        except Exception:
+            pass
+
+        # Inject as system message to trigger main agent
+        msg = InboundMessage(
+            channel="system",
+            sender_id="subagent",
+            chat_id=f"{origin['channel']}:{origin['chat_id']}",
+            content=announce_content,
+        )
+
+        await self.bus.publish_inbound(msg)
+        logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
+
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""
         return len(self._running_tasks)

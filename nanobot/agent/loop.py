@@ -7,6 +7,7 @@ import json_repair
 from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable
+from datetime import datetime
 
 from loguru import logger
 
@@ -114,7 +115,32 @@ class AgentLoop:
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
+
+        # Setup monitor logging
+        self._setup_monitor()
+
         self._register_default_tools()
+
+    def _setup_monitor(self) -> None:
+        """Setup monitor logging directory and file."""
+        from nanobot.config.loader import get_data_dir
+        monitor_dir = get_data_dir() / "monitor"
+        monitor_dir.mkdir(parents=True, exist_ok=True)
+        self._monitor_file = monitor_dir / "messages.log"
+
+    def _log_monitor(self, msg_type: str, content: str, session: str | None = None, channel: str | None = None) -> None:
+        """Log a message to the monitor file."""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            session_part = f" session:{session}" if session else ""
+            channel_part = f" channel:{channel}" if channel else ""
+            log_entry = f"[{timestamp}] [{msg_type}{session_part}{channel_part}] {content}\n"
+
+            with open(self._monitor_file, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+        except Exception:
+            # Don't let monitor logging break the agent
+            pass
     
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -421,10 +447,14 @@ class AgentLoop:
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-        
+
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
-        
+
+        # Log to monitor
+        self._log_monitor("inbound", msg.content[:200], session.key, msg.channel)
+        self._log_monitor("outbound", final_content[:200], session.key, msg.channel)
+
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content,
                             tools_used=tools_used if tools_used else None)

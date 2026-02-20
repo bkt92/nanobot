@@ -1086,5 +1086,144 @@ def _login_github_copilot() -> None:
         raise typer.Exit(1)
 
 
+# ============================================================================
+# Monitor Command
+# ============================================================================
+
+@app.command()
+def monitor(
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow mode (real-time updates)"),
+    count: int = typer.Option(20, "--count", "-n", help="Number of recent messages to show"),
+    session: str = typer.Option(None, "--session", "-s", help="Filter by session ID"),
+    channel: str = typer.Option(None, "--channel", "-c", help="Filter by channel"),
+):
+    """Monitor internal agent and subagent conversations."""
+    import asyncio
+    from pathlib import Path
+    from nanobot.config.loader import get_data_dir
+
+    data_dir = get_data_dir()
+    monitor_file = data_dir / "monitor" / "messages.log"
+
+    if not monitor_file.exists():
+        console.print("[yellow]No monitor data found.[/yellow]")
+        console.print("Start the gateway or agent with monitoring enabled to see conversations.")
+        raise typer.Exit(0)
+
+    # Read recent messages
+    lines = monitor_file.read_text(encoding="utf-8").splitlines()
+
+    # Filter by session/channel if specified
+    if session or channel:
+        filtered = []
+        for line in lines:
+            if session and f"session:{session}" not in line:
+                continue
+            if channel and f"channel:{channel}" not in line:
+                continue
+            filtered.append(line)
+        lines = filtered
+
+    # Show last N messages
+    if count:
+        lines = lines[-count:]
+
+    console.print(f"\n[bold]Agent Conversation Monitor[/bold]")
+    console.print(f"[dim]Showing {len(lines)} messages[/dim]\n")
+
+    for line in lines:
+        # Parse and format
+        try:
+            # Format: [timestamp] [type] [session] content
+            if "] [" in line:
+                parts = line.split("] [", 3)
+                if len(parts) >= 3:
+                    timestamp = parts[0].strip("[")
+                    msg_type = parts[1].rstrip("]")
+                    rest = parts[2]
+                    content = rest.split("]", 1)[1] if "]" in rest else ""
+
+                    # Color by type
+                    if msg_type == "inbound":
+                        color = "cyan"
+                        icon = "→"
+                    elif msg_type == "outbound":
+                        color = "green"
+                        icon = "←"
+                    elif msg_type == "system":
+                        color = "yellow"
+                        icon = "⚙"
+                    elif msg_type == "subagent":
+                        color = "magenta"
+                        icon = "🤖"
+                    else:
+                        color = "white"
+                        icon = "•"
+
+                    console.print(f"[dim]{timestamp}[/dim] [{color}]{icon} {msg_type}:[/{color}] {content[:200]}")
+        except:
+            # If parsing fails, show raw line
+            console.print(line)
+
+    if follow:
+        console.print("\n[bold]Following new messages... (Ctrl+C to stop)[/bold]\n")
+        last_size = monitor_file.stat().st_size
+
+        try:
+            while True:
+                import time
+                time.sleep(0.5)
+
+                if not monitor_file.exists():
+                    break
+
+                current_size = monitor_file.stat().st_size
+                if current_size > last_size:
+                    # Read new lines
+                    with open(monitor_file, "r") as f:
+                        f.seek(last_size)
+                        new_lines = f.readlines()
+
+                    for line in new_lines:
+                        if line.strip():
+                            # Apply filtering
+                            if session and f"session:{session}" not in line:
+                                continue
+                            if channel and f"channel:{channel}" not in line:
+                                continue
+
+                            # Parse and format
+                            if "] [" in line:
+                                parts = line.split("] [", 3)
+                                if len(parts) >= 3:
+                                    timestamp = parts[0].strip("[")
+                                    msg_type = parts[1].rstrip("]")
+                                    rest = parts[2]
+                                    content = rest.split("]", 1)[1] if "]" in rest else ""
+
+                                    if msg_type == "inbound":
+                                        color = "cyan"
+                                        icon = "→"
+                                    elif msg_type == "outbound":
+                                        color = "green"
+                                        icon = "←"
+                                    elif msg_type == "system":
+                                        color = "yellow"
+                                        icon = "⚙"
+                                    elif msg_type == "subagent":
+                                        color = "magenta"
+                                        icon = "🤖"
+                                    else:
+                                        color = "white"
+                                        icon = "•"
+
+                                    console.print(f"[dim]{timestamp}[/dim] [{color}]{icon} {msg_type}:[/{color}] {content[:200]}")
+
+                    last_size = current_size
+
+        except KeyboardInterrupt:
+            console.print("\n\n[yellow]Monitoring stopped[/yellow]")
+
+
 if __name__ == "__main__":
     app()
