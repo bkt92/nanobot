@@ -26,6 +26,14 @@ from nanobot.agent.tools.camoufox_browser import CamoufoxBrowserTool
 from nanobot.agent.tools.research import ResearchTool
 from nanobot.agent.tools.multiedit import MultiEditTool
 from nanobot.agent.tools.todo import TodoTool
+from nanobot.agent.tools.workflow import (
+    AwaitAgentTool,
+    GetAgentResultTool,
+    ParallelGroupTool,
+    AwaitGroupTool,
+    SpawnChainTool,
+    WaitAllTool,
+)
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import Session, SessionManager
@@ -194,6 +202,14 @@ class AgentLoop:
         # List profiles tool
         from nanobot.agent.tools.profiles import ListProfilesTool
         self.tools.register(ListProfilesTool(config=self.config))
+
+        # Workflow tools for advanced agent patterns
+        self.tools.register(AwaitAgentTool(manager=self.subagents))
+        self.tools.register(GetAgentResultTool(manager=self.subagents))
+        self.tools.register(ParallelGroupTool(manager=self.subagents))
+        self.tools.register(AwaitGroupTool(manager=self.subagents))
+        self.tools.register(SpawnChainTool(manager=self.subagents))
+        self.tools.register(WaitAllTool(manager=self.subagents))
 
         # Multi-file edit tool
         self.tools.register(MultiEditTool(allowed_dir=allowed_dir))

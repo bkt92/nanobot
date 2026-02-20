@@ -72,6 +72,7 @@ class SubagentManager:
         self.config = config
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_states: dict[str, SubagentTask] = {}  # Track task state
+        self._parallel_groups: dict[str, list[str]] = {}  # Track parallel groups
 
     async def spawn(
         self,
@@ -395,3 +396,266 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""
         return len(self._running_tasks)
+
+    async def await_agent(self, task_id: str, timeout: float = 300.0) -> SubagentTask:
+        """
+        Wait for a specific subagent to complete and return its result.
+
+        Args:
+            task_id: The task ID to wait for
+            timeout: Maximum wait time in seconds (default: 300)
+
+        Returns:
+            The completed SubagentTask with result
+
+        Raises:
+            asyncio.TimeoutError: If timeout is exceeded
+            ValueError: If task_id not found
+        """
+        if task_id not in self._task_states:
+            raise ValueError(f"Task '{task_id}' not found")
+
+        task = self._running_tasks.get(task_id)
+        if not task:
+            # Task might already be complete
+            state = self._task_states.get(task_id)
+            if state and state.status in ("completed", "failed", "cancelled"):
+                return state
+            raise ValueError(f"Task '{task_id}' is not running")
+
+        try:
+            await asyncio.wait_for(task, timeout=timeout)
+        except asyncio.TimeoutError:
+            # Try to cancel the task
+            await self.cancel(task_id)
+            raise asyncio.TimeoutError(f"Task '{task_id}' timed out after {timeout}s")
+
+        # Return the completed task state
+        return self._task_states.get(task_id)
+
+    def get_agent_result(self, task_id: str) -> str | None:
+        """
+        Get the result from a completed subagent.
+
+        Args:
+            task_id: The task ID to get result from
+
+        Returns:
+            The result string, or None if not available
+        """
+        state = self._task_states.get(task_id)
+        if not state:
+            return None
+
+        if state.status != "completed":
+            return None
+
+        return state.result
+
+    async def spawn_chain(self, tasks: list[dict[str, Any]]) -> list[SubagentTask]:
+        """
+        Execute a chain of tasks sequentially (pipeline pattern).
+
+        Each task waits for the previous one to complete before starting.
+        Results from previous tasks can be passed to subsequent tasks.
+
+        Args:
+            tasks: List of task dicts with keys:
+                - task: The task description
+                - label: Short label
+                - profile: Optional agent profile
+                - use_result: Optional bool to include previous result in context
+
+        Returns:
+            List of completed SubagentTask objects in order
+        """
+        completed = []
+        previous_result = None
+        origin_channel = "cli"
+        origin_chat_id = "direct"
+
+        for i, task_spec in enumerate(tasks):
+            # Build task with context from previous result
+            task_desc = task_spec.get("task", "")
+            label = task_spec.get("label", f"Chain step {i+1}")
+            profile = self._resolve_profile(task_spec.get("profile"))
+            use_result = task_spec.get("use_result", False)
+
+            if use_result and previous_result:
+                task_desc = f"Previous result:\n{previous_result}\n\nNew task:\n{task_desc}"
+
+            # Spawn and wait for completion
+            await self.spawn(
+                task=task_desc,
+                label=label,
+                origin_channel=origin_channel,
+                origin_chat_id=origin_chat_id,
+                profile=profile,
+            )
+
+            # Wait for this specific task
+            # Get the most recent task_id
+            task_id = list(self._running_tasks.keys())[-1]
+            completed_task = await self.await_agent(task_id)
+            completed.append(completed_task)
+
+            # Store result for next task
+            if completed_task.status == "completed":
+                previous_result = completed_task.result
+            else:
+                # Task failed, stop the chain
+                break
+
+        return completed
+
+    def _resolve_profile(self, profile_name: str | None) -> "AgentProfile | None":
+        """Resolve profile name to AgentProfile object."""
+        if not profile_name or not self.config:
+            return None
+
+        return self.config.agents.profiles.get(profile_name)
+
+    async def create_parallel_group(self, group_id: str, tasks: list[dict[str, Any]]) -> list[str]:
+        """
+        Create a parallel group of subagents (hybrid pattern support).
+
+        All tasks in the group are spawned simultaneously.
+        Use await_group() to wait for all to complete.
+
+        Args:
+            group_id: Unique identifier for this group
+            tasks: List of task dicts with keys:
+                - task: The task description
+                - label: Short label
+                - profile: Optional agent profile
+
+        Returns:
+            List of task IDs for the spawned agents
+        """
+        task_ids = []
+        origin_channel = "cli"
+        origin_chat_id = "direct"
+
+        for task_spec in tasks:
+            task_desc = task_spec.get("task", "")
+            label = task_spec.get("label", f"Group {group_id} task")
+            profile_name = task_spec.get("profile")
+            profile = self._resolve_profile(profile_name)
+
+            # Spawn the subagent (non-blocking)
+            result = await self.spawn(
+                task=task_desc,
+                label=label,
+                origin_channel=origin_channel,
+                origin_chat_id=origin_chat_id,
+                profile=profile,
+            )
+
+            # Extract task_id from the result message
+            # Format: "Subagent [label] started (id: {task_id})..."
+            import re
+            match = re.search(r'\(id:\s*([a-z0-9]+)\)', result)
+            if match:
+                task_ids.append(match.group(1))
+
+        # Track the group
+        self._parallel_groups[group_id] = task_ids
+
+        return task_ids
+
+    async def await_group(self, group_id: str, timeout: float = 600.0) -> list[SubagentTask]:
+        """
+        Wait for all agents in a parallel group to complete.
+
+        Args:
+            group_id: The group ID to wait for
+            timeout: Maximum wait time in seconds (default: 600)
+
+        Returns:
+            List of completed SubagentTask objects
+
+        Raises:
+            ValueError: If group_id not found
+            asyncio.TimeoutError: If timeout is exceeded
+        """
+        if group_id not in self._parallel_groups:
+            raise ValueError(f"Group '{group_id}' not found")
+
+        task_ids = self._parallel_groups[group_id]
+
+        try:
+            # Wait for all tasks in the group
+            await asyncio.wait_for(
+                asyncio.gather(*[
+                    self._running_tasks[tid] for tid in task_ids
+                    if tid in self._running_tasks
+                ], return_exceptions=True),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            # Cancel remaining tasks
+            for tid in task_ids:
+                await self.cancel(tid)
+            raise asyncio.TimeoutError(f"Group '{group_id}' timed out after {timeout}s")
+
+        # Return all completed tasks
+        return [
+            self._task_states[tid] for tid in task_ids
+            if tid in self._task_states
+        ]
+
+    async def wait_all(
+        self,
+        task_ids: list[str],
+        mode: str = "all",
+        timeout: float = 600.0
+    ) -> dict[str, SubagentTask]:
+        """
+        Wait for multiple agents with flexible conditions.
+
+        Args:
+            task_ids: List of task IDs to wait for
+            mode: "all" (wait for everyone) or "any" (wait for first completion)
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            Dictionary mapping task_id to SubagentTask
+
+        Raises:
+            ValueError: If mode is invalid
+            asyncio.TimeoutError: If timeout is exceeded
+        """
+        if mode not in ("all", "any"):
+            raise ValueError(f"Invalid mode: {mode}. Use 'all' or 'any'")
+
+        if not task_ids:
+            return {}
+
+        valid_tasks = [
+            self._running_tasks[tid] for tid in task_ids
+            if tid in self._running_tasks
+        ]
+
+        if not valid_tasks:
+            return {
+                tid: self._task_states[tid]
+                for tid in task_ids
+                if tid in self._task_states
+            }
+
+        if mode == "all":
+            await asyncio.wait_for(
+                asyncio.gather(*valid_tasks, return_exceptions=True),
+                timeout=timeout
+            )
+        else:  # mode == "any"
+            await asyncio.wait_for(
+                asyncio.wait(valid_tasks, return_when=asyncio.FIRST_COMPLETED),
+                timeout=timeout
+            )
+
+        return {
+            tid: self._task_states[tid]
+            for tid in task_ids
+            if tid in self._task_states
+        }
