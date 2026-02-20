@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 from loguru import logger
-from telegram import BotCommand, Update
+from telegram import BotCommand, Update, ReplyParameters
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
@@ -82,6 +82,26 @@ def _markdown_to_telegram_html(text: str) -> str:
     return text
 
 
+def _split_message(content: str, max_len: int = 4000) -> list[str]:
+    """Split content into chunks within max_len, preferring line breaks."""
+    if len(content) <= max_len:
+        return [content]
+    chunks: list[str] = []
+    while content:
+        if len(content) <= max_len:
+            chunks.append(content)
+            break
+        cut = content[:max_len]
+        pos = cut.rfind('\n')
+        if pos == -1:
+            pos = cut.rfind(' ')
+        if pos == -1:
+            pos = max_len
+        chunks.append(content[:pos])
+        content = content[pos:].lstrip()
+    return chunks
+
+
 class TelegramChannel(BaseChannel):
     """
     Telegram channel using long polling.
@@ -130,7 +150,7 @@ class TelegramChannel(BaseChannel):
         # Add command handlers
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
-        self._app.add_handler(CommandHandler("help", self._forward_command))
+        self._app.add_handler(CommandHandler("help", self._on_help))
         
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -149,13 +169,13 @@ class TelegramChannel(BaseChannel):
         
         # Get bot info and register command menu
         bot_info = await self._app.bot.get_me()
-        logger.info(f"Telegram bot @{bot_info.username} connected")
+        logger.info("Telegram bot @{} connected", bot_info.username)
         
         try:
             await self._app.bot.set_my_commands(self.BOT_COMMANDS)
             logger.debug("Telegram bot commands registered")
         except Exception as e:
-            logger.warning(f"Failed to register bot commands: {e}")
+            logger.warning("Failed to register bot commands: {}", e)
         
         # Start polling (this runs until stopped)
         await self._app.updater.start_polling(
@@ -182,112 +202,122 @@ class TelegramChannel(BaseChannel):
             await self._app.shutdown()
             self._app = None
     
+    @staticmethod
+    def _get_media_type(path: str) -> str:
+        """Guess media type from file extension."""
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        if ext in ("jpg", "jpeg", "png", "gif", "webp"):
+            return "photo"
+        if ext == "ogg":
+            return "voice"
+        if ext in ("mp3", "m4a", "wav", "aac"):
+            return "audio"
+        return "document"
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Telegram (supports text and images/media)."""
         if not self._app:
             logger.warning("Telegram bot not running")
             return
 
-        # Stop typing indicator for this chat
         self._stop_typing(msg.chat_id)
 
         try:
             chat_id = int(msg.chat_id)
+        except ValueError:
+            logger.error("Invalid chat_id: {}", msg.chat_id)
+            return
 
-            # Send media attachments first (photos, audio, documents, etc.)
-            if msg.media:
-                for media_path in msg.media:
-                    try:
-                        path = Path(media_path)
-                        if not path.exists():
-                            logger.warning(f"Media file not found: {media_path}")
-                            continue
+        reply_params = None
+        if self.config.reply_to_message:
+            reply_to_message_id = msg.metadata.get("message_id")
+            if reply_to_message_id:
+                reply_params = ReplyParameters(
+                    message_id=reply_to_message_id,
+                    allow_sending_without_reply=True
+                )
 
-                        # Detect file type from MIME
-                        mime, _ = mimetypes.guess_type(str(path))
-                        if not mime:
-                            mime = ""
+        # Send media files
+        for media_path in (msg.media or []):
+            try:
+                media_type = self._get_media_type(media_path)
+                sender = {
+                    "photo": self._app.bot.send_photo,
+                    "voice": self._app.bot.send_voice,
+                    "audio": self._app.bot.send_audio,
+                }.get(media_type, self._app.bot.send_document)
+                param = "photo" if media_type == "photo" else media_type if media_type in ("voice", "audio") else "document"
+                with open(media_path, 'rb') as f:
+                    await sender(
+                        chat_id=chat_id,
+                        **{param: f},
+                        reply_parameters=reply_params
+                    )
+            except Exception as e:
+                filename = media_path.rsplit("/", 1)[-1]
+                logger.error("Failed to send media {}: {}", media_path, e)
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"[Failed to send: {filename}]",
+                    reply_parameters=reply_params
+                )
 
-                        # Determine file type and use appropriate send method
-                        with open(path, "rb") as f:
-                            if mime.startswith("image/"):
-                                # Send as photo (with preview, no download required)
-                                await self._app.bot.send_photo(chat_id=chat_id, photo=f)
-                                logger.debug(f"Sent photo: {media_path}")
-
-                            elif mime.startswith("audio/"):
-                                # Send as audio (with player, duration display)
-                                # Extract filename without extension for title
-                                title = path.stem
-                                await self._app.bot.send_audio(
-                                    chat_id=chat_id,
-                                    audio=f,
-                                    title=title
-                                )
-                                logger.debug(f"Sent audio: {media_path}")
-
-                            elif mime.startswith("video/"):
-                                # Send as video (with preview, player controls)
-                                await self._app.bot.send_video(chat_id=chat_id, video=f)
-                                logger.debug(f"Sent video: {media_path}")
-
-                            else:
-                                # Send as generic document
-                                await self._app.bot.send_document(chat_id=chat_id, document=f)
-                                logger.debug(f"Sent document: {media_path}")
-
-                        # Small delay between media files
-                        await asyncio.sleep(0.3)
-                    except Exception as e:
-                        logger.error(f"Failed to send media {media_path}: {e}")
-
-            # Send text content
-            if msg.content and msg.content.strip():
-                # Convert markdown to Telegram HTML
-                html_content = _markdown_to_telegram_html(msg.content)
-
-                # Validate HTML conversion didn't produce empty content
-                if not html_content or not html_content.strip():
-                    html_content = msg.content
-
-                # Split message if it exceeds Telegram's 4096 character limit
-                chunks = split_telegram_message(html_content, limit=4096)
-
-                for i, chunk in enumerate(chunks):
-                    if not chunk or not chunk.strip():
-                        continue
+        # Send text content
+        if msg.content and msg.content != "[empty message]":
+            for chunk in _split_message(msg.content):
+                try:
+                    html = _markdown_to_telegram_html(chunk)
                     await self._app.bot.send_message(
                         chat_id=chat_id,
-                        text=chunk,
-                        parse_mode="HTML"
+                        text=html,
+                        parse_mode="HTML",
+                        reply_parameters=reply_params
                     )
-                    # Small delay between chunks to avoid rate limiting
-                    if i < len(chunks) - 1:
-                        await asyncio.sleep(0.5)
-
-        except ValueError:
-            logger.error(f"Invalid chat_id: {msg.chat_id}")
-        except Exception as e:
-            logger.error(f"Error sending Telegram message: {e}")
+                except Exception as e:
+                    logger.warning("HTML parse failed, falling back to plain text: {}", e)
+                    try:
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk,
+                            reply_parameters=reply_params
+                        )
+                    except Exception as e2:
+                        logger.error("Error sending Telegram message: {}", e2)
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""
         if not update.message or not update.effective_user:
             return
-        
+
         user = update.effective_user
         await update.message.reply_text(
             f"👋 Hi {user.first_name}! I'm nanobot.\n\n"
             "Send me a message and I'll respond!\n"
             "Type /help to see available commands."
         )
-    
+
+    async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /help command, bypassing ACL so all users can access it."""
+        if not update.message:
+            return
+        await update.message.reply_text(
+            "🐈 nanobot commands:\n"
+            "/new — Start a new conversation\n"
+            "/help — Show available commands"
+        )
+
+    @staticmethod
+    def _sender_id(user) -> str:
+        """Build sender_id with username for allowlist matching."""
+        sid = str(user.id)
+        return f"{sid}|{user.username}" if user.username else sid
+
     async def _forward_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Forward slash commands to the bus for unified handling in AgentLoop."""
         if not update.message or not update.effective_user:
             return
         await self._handle_message(
-            sender_id=str(update.effective_user.id),
+            sender_id=self._sender_id(update.effective_user),
             chat_id=str(update.message.chat_id),
             content=update.message.text,
         )
@@ -300,11 +330,7 @@ class TelegramChannel(BaseChannel):
         message = update.message
         user = update.effective_user
         chat_id = message.chat_id
-        
-        # Use stable numeric ID, but keep username for allowlist compatibility
-        sender_id = str(user.id)
-        if user.username:
-            sender_id = f"{sender_id}|{user.username}"
+        sender_id = self._sender_id(user)
         
         # Store chat_id for replies
         self._chat_ids[sender_id] = chat_id
@@ -358,21 +384,21 @@ class TelegramChannel(BaseChannel):
                     transcriber = GroqTranscriptionProvider(api_key=self.groq_api_key)
                     transcription = await transcriber.transcribe(file_path)
                     if transcription:
-                        logger.info(f"Transcribed {media_type}: {transcription[:50]}...")
+                        logger.info("Transcribed {}: {}...", media_type, transcription[:50])
                         content_parts.append(f"[transcription: {transcription}]")
                     else:
                         content_parts.append(f"[{media_type}: {file_path}]")
                 else:
                     content_parts.append(f"[{media_type}: {file_path}]")
                     
-                logger.debug(f"Downloaded {media_type} to {file_path}")
+                logger.debug("Downloaded {} to {}", media_type, file_path)
             except Exception as e:
-                logger.error(f"Failed to download media: {e}")
+                logger.error("Failed to download media: {}", e)
                 content_parts.append(f"[{media_type}: download failed]")
         
         content = "\n".join(content_parts) if content_parts else "[empty message]"
         
-        logger.debug(f"Telegram message from {sender_id}: {content[:50]}...")
+        logger.debug("Telegram message from {}: {}...", sender_id, content[:50])
         
         str_chat_id = str(chat_id)
         
@@ -415,11 +441,11 @@ class TelegramChannel(BaseChannel):
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.debug(f"Typing indicator stopped for {chat_id}: {e}")
+            logger.debug("Typing indicator stopped for {}: {}", chat_id, e)
     
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log polling / handler errors instead of silently swallowing them."""
-        logger.error(f"Telegram error: {context.error}")
+        logger.error("Telegram error: {}", context.error)
 
     def _get_extension(self, media_type: str, mime_type: str | None) -> str:
         """Get file extension based on media type."""

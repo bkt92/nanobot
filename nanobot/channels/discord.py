@@ -52,7 +52,7 @@ class DiscordChannel(BaseChannel):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(f"Discord gateway error: {e}")
+                logger.warning("Discord gateway error: {}", e)
                 if self._running:
                     logger.info("Reconnecting to Discord gateway in 5 seconds...")
                     await asyncio.sleep(5)
@@ -91,29 +91,29 @@ class DiscordChannel(BaseChannel):
                 payload["message_reference"] = {"message_id": msg.reply_to}
                 payload["allowed_mentions"] = {"replied_user": False}
 
-            headers = {"Authorization": f"Bot {self.config.token}"}
+        headers = {"Authorization": f"Bot {self.config.token}"}
 
-            try:
-                for attempt in range(3):
-                    try:
-                        response = await self._http.post(url, headers=headers, json=payload)
-                        if response.status_code == 429:
-                            data = response.json()
-                            retry_after = float(data.get("retry_after", 1.0))
-                            logger.warning(f"Discord rate limited, retrying in {retry_after}s")
-                            await asyncio.sleep(retry_after)
-                            continue
-                        response.raise_for_status()
-                        break
-                    except Exception as e:
-                        if attempt == 2:
-                            logger.error(f"Error sending Discord message: {e}")
-                        else:
-                            await asyncio.sleep(1)
-            finally:
-                # Stop typing after the last chunk
-                if i == len(chunks) - 1:
-                    await self._stop_typing(msg.chat_id)
+        try:
+            for attempt in range(3):
+                try:
+                    response = await self._http.post(url, headers=headers, json=payload)
+                    if response.status_code == 429:
+                        data = response.json()
+                        retry_after = float(data.get("retry_after", 1.0))
+                        logger.warning("Discord rate limited, retrying in {}s", retry_after)
+                        await asyncio.sleep(retry_after)
+                        continue
+                    response.raise_for_status()
+                    return
+                except Exception as e:
+                    if attempt == 2:
+                        logger.error("Error sending Discord message: {}", e)
+                    else:
+                        await asyncio.sleep(1)
+        finally:
+            # Stop typing after the last chunk
+            if i == len(chunks) - 1:
+                await self._stop_typing(msg.chat_id)
 
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""
@@ -124,7 +124,7 @@ class DiscordChannel(BaseChannel):
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON from Discord gateway: {raw[:100]}")
+                logger.warning("Invalid JSON from Discord gateway: {}", raw[:100])
                 continue
 
             op = data.get("op")
@@ -183,7 +183,7 @@ class DiscordChannel(BaseChannel):
                 try:
                     await self._ws.send(json.dumps(payload))
                 except Exception as e:
-                    logger.warning(f"Discord heartbeat failed: {e}")
+                    logger.warning("Discord heartbeat failed: {}", e)
                     break
                 await asyncio.sleep(interval_s)
 
@@ -227,7 +227,7 @@ class DiscordChannel(BaseChannel):
                 media_paths.append(str(file_path))
                 content_parts.append(f"[attachment: {file_path}]")
             except Exception as e:
-                logger.warning(f"Failed to download Discord attachment: {e}")
+                logger.warning("Failed to download Discord attachment: {}", e)
                 content_parts.append(f"[attachment: {filename} - download failed]")
 
         reply_to = (payload.get("referenced_message") or {}).get("id")

@@ -25,3 +25,4 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `research` | Deep research skill cloning Perplexica's iterative search mechanism |
 | `camoufox` | Anti-detect web browsing using Camoufox browser for sites with bot protection |
 | `memory` | Two-layer memory system with grep-based recall |
+| `clawhub` | Search and install skills from ClawHub registry |
