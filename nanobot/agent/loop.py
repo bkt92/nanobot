@@ -21,6 +21,10 @@ from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.camoufox_browser import CamoufoxBrowserTool
+from nanobot.agent.tools.research import ResearchTool
+from nanobot.agent.tools.multiedit import MultiEditTool
+from nanobot.agent.tools.todo import TodoTool
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import Session, SessionManager
@@ -132,6 +136,15 @@ class AgentLoop:
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
 
+        # Research tool (Perplexica-style deep research)
+        self.tools.register(ResearchTool(
+            api_key=self.brave_api_key,
+            max_results=10
+        ))
+
+        # Camoufox anti-detect browser tool
+        self.tools.register(CamoufoxBrowserTool(workspace=self.workspace))
+
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
@@ -155,6 +168,12 @@ class AgentLoop:
         # List profiles tool
         from nanobot.agent.tools.profiles import ListProfilesTool
         self.tools.register(ListProfilesTool(config=self.config))
+
+        # Multi-file edit tool
+        self.tools.register(MultiEditTool(allowed_dir=allowed_dir))
+
+        # Todo list tool
+        self.tools.register(TodoTool(self.workspace, profile=self.profile_name))
     
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
